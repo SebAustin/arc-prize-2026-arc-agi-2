@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Artifacts / outputs
+artifacts/
+*.json.tmp
+
+# Local data is NOT committed (read from Downloads / Kaggle mount via config.py)
+data/
+
+# Session handoff / scratch notes (not project content)
+.remember/
+
+# OS
+.DS_Store

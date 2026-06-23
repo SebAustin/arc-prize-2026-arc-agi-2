@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc-agi2-solver"
+version = "0.1.0"
+description = "ARC Prize 2026 (ARC-AGI-2) solver: hybrid DSL + test-time-training LLM pipeline"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# Installed only in the Kaggle/GPU environment (M1+). Kept out of the CPU dev
+# venv so local smoke runs stay light. Versions pinned at staging time.
+gpu = [
+    "torch",
+    "transformers",
+    "peft",
+    "accelerate",
+]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
