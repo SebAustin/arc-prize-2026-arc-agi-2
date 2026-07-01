@@ -16,9 +16,10 @@ import time
 
 from arc.config import get_config
 from arc.eval.harness import load_split
-from arc.io.submission import build_submission, validate_submission
 from arc.eval.metrics import score_predictions
-from arc.pipeline import default_solvers, run as run_pipeline
+from arc.io.submission import build_submission, validate_submission
+from arc.pipeline import default_solvers
+from arc.pipeline import run as run_pipeline
 
 
 def main() -> None:

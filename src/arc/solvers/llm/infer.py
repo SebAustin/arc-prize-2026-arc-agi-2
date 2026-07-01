@@ -18,6 +18,7 @@ def generate_candidates(
     num_samples: int = 1,
     max_new_tokens: int = 1024,
     temperature: float = 0.0,
+    max_time_s: float | None = None,
 ) -> list[Grid]:
     """Prompt the model and return the valid grids parsed from its completions."""
     prompt = build_prompt(train, test_input)
@@ -26,6 +27,7 @@ def generate_candidates(
         max_new_tokens=max_new_tokens,
         num_samples=num_samples,
         temperature=temperature,
+        max_time_s=max_time_s,
     )
     grids: list[Grid] = []
     for completion in completions:

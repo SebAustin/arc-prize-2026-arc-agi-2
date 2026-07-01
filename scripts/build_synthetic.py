@@ -15,7 +15,8 @@ import time
 from collections import Counter
 
 from arc.eval.metrics import score_predictions
-from arc.pipeline import default_solvers, run as run_pipeline
+from arc.pipeline import default_solvers
+from arc.pipeline import run as run_pipeline
 from arc.synth.build_dataset import (
     build_synthetic_tasks,
     save_examples_jsonl,

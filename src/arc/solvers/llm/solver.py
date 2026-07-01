@@ -67,6 +67,9 @@ class LLMSolver(Solver):
                     num_samples=self.num_samples,
                     max_new_tokens=self.max_new_tokens,
                     temperature=self.temperature,
+                    # Cap this decode at the time still left in the per-task
+                    # budget so one slow generation can't overrun it.
+                    max_time_s=max(0.0, deadline - time.monotonic()),
                 )
                 for grid in grids:
                     weighted.append((aug.invert_grid(grid), 1.0))

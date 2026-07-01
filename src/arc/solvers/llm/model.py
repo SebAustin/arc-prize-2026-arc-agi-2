@@ -31,8 +31,11 @@ class LanguageModel(Protocol):
         max_new_tokens: int = 1024,
         num_samples: int = 1,
         temperature: float = 0.0,
+        max_time_s: float | None = None,
     ) -> list[str]:
-        """Return `num_samples` completion strings for `prompt`."""
+        """Return `num_samples` completion strings for `prompt`. `max_time_s`, if
+        given, caps decode wall-clock so a stalled generation cannot blow the
+        per-task budget."""
         ...
 
     def score(self, prompt: str, completion: str) -> float:
@@ -54,6 +57,7 @@ class MockModel:
         max_new_tokens: int = 1024,
         num_samples: int = 1,
         temperature: float = 0.0,
+        max_time_s: float | None = None,
     ) -> list[str]:
         grid = extract_last_input(prompt)
         if grid is None:
@@ -98,6 +102,7 @@ class HFModel:
             model_path,
             torch_dtype=getattr(torch, dtype),
             device_map=device,
+            use_safetensors=True,  # refuse pickle .bin checkpoints (RCE surface)
         )
         if adapter_path is not None:
             from peft import PeftModel  # noqa: PLC0415
@@ -112,10 +117,16 @@ class HFModel:
         max_new_tokens: int = 1024,
         num_samples: int = 1,
         temperature: float = 0.0,
+        max_time_s: float | None = None,
     ) -> list[str]:
         torch = self._torch
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         do_sample = temperature > 0.0
+        gen_kwargs = {}
+        if max_time_s is not None and max_time_s > 0:
+            # transformers stops generating once this wall-clock elapses, so a
+            # stalled decode cannot overrun the per-task time budget.
+            gen_kwargs["max_time"] = max_time_s
         with torch.no_grad():
             out = self.model.generate(
                 **inputs,
@@ -124,6 +135,7 @@ class HFModel:
                 temperature=temperature if do_sample else None,
                 num_return_sequences=num_samples if do_sample else 1,
                 pad_token_id=self.tokenizer.pad_token_id,
+                **gen_kwargs,
             )
         prompt_len = inputs["input_ids"].shape[1]
         completions = [

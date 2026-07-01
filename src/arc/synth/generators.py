@@ -18,9 +18,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..augment import symmetry
 from ..io.grid import Grid, from_numpy, is_valid_grid, to_numpy
 from ..io.loader import Pair, Task
-from ..augment import symmetry
 from ..solvers.dsl.primitives import (
     colormap_program,
     crop_to_content,
@@ -103,7 +103,7 @@ class RecolorGenerator(Generator):
     def sample(self, rng, n_inputs):
         palette = _palette(rng)
         shuffled = list(rng.permutation(palette))
-        mapping = {int(s): int(d) for s, d in zip(palette, shuffled)}
+        mapping = {int(s): int(d) for s, d in zip(palette, shuffled, strict=False)}
         transform = colormap_program(mapping)
         inputs = [
             _random_grid(rng, _size(rng, 3, 12), _size(rng, 3, 12), palette)

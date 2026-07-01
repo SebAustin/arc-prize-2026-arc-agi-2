@@ -28,7 +28,11 @@ def test_generator_produces_well_formed_task(gen, seed):
     assert is_well_formed(gt)
 
 
-@pytest.mark.parametrize("gen", [g for g in GENERATORS if g.name in DSL_SOLVABLE], ids=lambda g: g.name)
+@pytest.mark.parametrize(
+    "gen",
+    [g for g in GENERATORS if g.name in DSL_SOLVABLE],
+    ids=lambda g: g.name,
+)
 def test_dsl_solvable_generators_are_solved(gen):
     gt = build_task(gen, seed=7)
     candidates = DSLSolver().solve(gt.task, budget_s=5.0)
@@ -54,7 +58,7 @@ def test_tasks_to_examples_format():
     tasks = build_synthetic_tasks(5, seed=2)
     examples = tasks_to_examples(tasks)
     assert len(examples) == 5
-    for ex, task in zip(examples, tasks):
+    for ex, task in zip(examples, tasks, strict=False):
         assert ex.prompt.rstrip().endswith("Output:")
         assert parse_completion(ex.completion) == task.test[0].output
 

@@ -61,6 +61,28 @@ def empty_predictions(tasks: dict[str, Task]) -> Predictions:
     }
 
 
+def fallback_from_raw(raw: object) -> Predictions:
+    """Best-effort schema-valid fallback from *raw* (possibly malformed) challenge
+    JSON: one 1x1-zero Attempt per test input, defaulting to a single output when
+    a task's test count cannot be determined.
+
+    Used by the Kaggle entrypoint to guarantee a scoreable submission exists on
+    disk *before* any parsing/model work, so a crash or OOM anywhere downstream
+    cannot leave an empty `/kaggle/working`.
+    """
+    preds: Predictions = {}
+    if not isinstance(raw, dict):
+        return preds
+    for task_id, body in raw.items():
+        n = 1
+        if isinstance(body, dict):
+            test = body.get("test")
+            if isinstance(test, list) and test:
+                n = len(test)
+        preds[str(task_id)] = [Attempt(FALLBACK_GRID, FALLBACK_GRID) for _ in range(n)]
+    return preds
+
+
 def validate_submission(submission: dict, tasks: dict[str, Task]) -> list[str]:
     """Return a list of schema problems; empty list means the submission is valid."""
     problems: list[str] = []

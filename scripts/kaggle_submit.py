@@ -17,13 +17,35 @@ Usage (inside the Kaggle notebook):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 
 from arc.config import get_config
-from arc.io.loader import load_challenges
-from arc.io.submission import build_submission, validate_submission
+from arc.io.loader import MalformedTaskError, load_challenges
+from arc.io.submission import (
+    build_submission,
+    fallback_from_raw,
+    validate_submission,
+    write_submission,
+)
 from arc.pipeline import run as run_pipeline
+
+
+def _pre_write_fallback(challenges_path, submission_path) -> int:
+    """Write a complete, schema-valid fallback submission BEFORE any parsing or
+    model work, so a crash/OOM anywhere downstream still leaves a scoreable file
+    on disk. Returns the number of tasks covered (0 if the file is unreadable)."""
+    try:
+        with open(challenges_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        preds = fallback_from_raw(raw)
+        write_submission(build_submission(preds), submission_path)
+        return len(preds)
+    except Exception as exc:  # noqa: BLE001 — last-resort guard, never fatal
+        print(f"WARNING: could not pre-write fallback submission: {exc}")
+        return 0
+
 
 # Per-test-input augmentations / samples — tuned per model on Kaggle.
 DEFAULT_LLM_KWARGS = {
@@ -71,7 +93,17 @@ def main(
     print(f"mode={cfg.mode}  data_dir={cfg.data_dir}  model_path={model_path}")
     print(f"adapter_path={adapter_path}  use_ttt={use_ttt}")
 
-    tasks = load_challenges(cfg.challenges_path("test"))
+    challenges_path = cfg.challenges_path("test")
+    covered = _pre_write_fallback(challenges_path, cfg.submission_path)
+    print(f"pre-wrote fallback submission for {covered} tasks -> {cfg.submission_path}")
+
+    try:
+        tasks = load_challenges(challenges_path)
+    except MalformedTaskError as exc:
+        # The pre-written fallback is already a complete, scoreable submission;
+        # keep it rather than crashing the kernel with an empty output.
+        print(f"ERROR: could not parse challenges ({exc}); keeping fallback submission")
+        return {"problems": [str(exc)], "elapsed_s": 0.0, "num_tasks": 0}
     print(f"loaded {len(tasks)} test tasks")
 
     solvers = None

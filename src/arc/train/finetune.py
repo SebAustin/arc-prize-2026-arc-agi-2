@@ -86,7 +86,10 @@ def finetune(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        base_model_path, torch_dtype=torch.bfloat16, device_map=device
+        base_model_path,
+        torch_dtype=torch.bfloat16,
+        device_map=device,
+        use_safetensors=True,  # refuse pickle .bin checkpoints (RCE surface)
     )
     lora = LoraConfig(
         r=cfg.lora_r,
@@ -124,6 +127,6 @@ def finetune(
                 optim.zero_grad()
         print(f"epoch {epoch + 1}/{cfg.epochs} done")
 
-    model.save_pretrained(output_dir)
+    model.save_pretrained(output_dir, safe_serialization=True)  # write .safetensors
     tokenizer.save_pretrained(output_dir)
     return output_dir

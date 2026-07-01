@@ -74,7 +74,7 @@ def save_examples_jsonl(examples: list[TrainExample], path: str | Path) -> Path:
 
 def load_examples_jsonl(path: str | Path) -> list[TrainExample]:
     examples: list[TrainExample] = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             row = json.loads(line)
             examples.append(TrainExample(prompt=row["prompt"], completion=row["completion"]))

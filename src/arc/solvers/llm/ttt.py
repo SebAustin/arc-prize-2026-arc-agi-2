@@ -15,6 +15,7 @@ delegate to the existing `LLMSolver` for augmentation-based inference + voting.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -94,11 +95,19 @@ class TTTSolver(Solver):
         self.ttt_data_kwargs = ttt_data_kwargs or {}
 
     def solve(self, task: Task, budget_s: float) -> Candidates:
+        t0 = time.monotonic()
         examples = build_ttt_examples(task, **self.ttt_data_kwargs)
-        adapted = self.runner.adapt(examples)
         try:
-            return LLMSolver(adapted, **self.llm_kwargs).solve(task, budget_s)
+            adapted = self.runner.adapt(examples)
+            # Charge corpus-build + adaptation time against this solver's budget
+            # so the inner transduction gets the time that is *actually* left,
+            # not a fresh full budget (which silently overran the per-task cap).
+            remaining = max(0.0, budget_s - (time.monotonic() - t0))
+            return LLMSolver(adapted, **self.llm_kwargs).solve(task, remaining)
         finally:
+            # `adapt()` is inside the try so reset() runs even if adaptation
+            # raises (e.g. CUDA OOM), restoring the shared base model for the
+            # next task instead of leaving it wrapped in a partial adapter.
             self.runner.reset()
 
 
@@ -130,30 +139,40 @@ class LoraTTTRunner:
             target_modules=list(cfg.target_modules),
             task_type="CAUSAL_LM",
         )
+        # `get_peft_model` injects LoRA layers into `self._base`'s module tree by
+        # reference, so a failure partway through training must unload the partial
+        # adapter — otherwise the shared model stays corrupted for later tasks.
         model = get_peft_model(self._base, lora)
-        model.train()
-        if hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable()
+        try:
+            model.train()
+            if hasattr(model, "gradient_checkpointing_enable"):
+                model.gradient_checkpointing_enable()
 
-        batches = self._tokenize(tokenizer, examples, cfg.max_seq_len)
-        optim = torch.optim.AdamW(
-            (p for p in model.parameters() if p.requires_grad), lr=cfg.learning_rate
-        )
-        device = self.hf_model.device
-        rng = torch.Generator().manual_seed(cfg.seed)
-        for _step in range(cfg.max_steps):
-            batch = self._sample_batch(batches, cfg.batch_size, rng)
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-            attn = batch["attention_mask"].to(device)
-            out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
-            out.loss.backward()
-            optim.step()
-            optim.zero_grad()
+            batches = self._tokenize(tokenizer, examples, cfg.max_seq_len)
+            optim = torch.optim.AdamW(
+                (p for p in model.parameters() if p.requires_grad),
+                lr=cfg.learning_rate,
+            )
+            device = self.hf_model.device
+            rng = torch.Generator().manual_seed(cfg.seed)
+            for _step in range(cfg.max_steps):
+                batch = self._sample_batch(batches, cfg.batch_size, rng)
+                input_ids = batch["input_ids"].to(device)
+                labels = batch["labels"].to(device)
+                attn = batch["attention_mask"].to(device)
+                out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
+                out.loss.backward()
+                optim.step()
+                optim.zero_grad()
 
-        model.eval()
-        self.hf_model.model = model
-        return self.hf_model
+            model.eval()
+            self.hf_model.model = model
+            return self.hf_model
+        except Exception:
+            self.hf_model.model = (
+                model.unload() if hasattr(model, "unload") else self._base
+            )
+            raise
 
     def reset(self) -> None:
         model = self.hf_model.model

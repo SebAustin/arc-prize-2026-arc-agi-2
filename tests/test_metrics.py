@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from arc.io.submission import Attempt
 from arc.eval.metrics import score_output, score_predictions
+from arc.io.submission import Attempt
 
 G1 = ((1, 2), (3, 4))
 G2 = ((0, 0), (0, 0))

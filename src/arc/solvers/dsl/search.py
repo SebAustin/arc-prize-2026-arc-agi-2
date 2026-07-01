@@ -10,9 +10,7 @@ milliseconds and never blows the per-task budget.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 
-from ...io.grid import Grid
 from ...io.loader import Task
 from ..base import Program, verify_program
 from . import primitives as P
