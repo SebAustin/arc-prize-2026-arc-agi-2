@@ -52,6 +52,28 @@ def _bootstrap_source(files: dict[str, str]) -> str:
     )
 
 
+ENV_PREP_SRC = (
+    "# Kaggle env prep (offline-safe). Some Kaggle images ship a `torchao` too old\n"
+    "# for the installed `peft`, which makes LoRA (TTT) adapter creation raise\n"
+    "# `ImportError: incompatible version of torchao` on EVERY task -> TTT silently\n"
+    "# degrades to the DSL-only ensemble. We don't use torchao, so drop the\n"
+    "# incompatible version and let peft fall back to the standard LoRA path.\n"
+    "import sys, subprocess\n"
+    "try:\n"
+    "    import torchao\n"
+    "    from packaging.version import parse as _p\n"
+    "    if _p(getattr(torchao, '__version__', '0')) < _p('0.16.0'):\n"
+    "        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'torchao'],\n"
+    "                       check=False)\n"
+    "        for _m in [k for k in list(sys.modules) if k.startswith('torchao')]:\n"
+    "            del sys.modules[_m]\n"
+    "        print('removed incompatible torchao (<0.16) so PEFT/LoRA can run')\n"
+    "    else:\n"
+    "        print('torchao', torchao.__version__, 'is compatible')\n"
+    "except ImportError:\n"
+    "    print('torchao not installed -> nothing to do')\n"
+)
+
 CONFIG_SRC = (
     "# Point these at your attached datasets/models.\n"
     "MODEL_DS = None      # e.g. '/kaggle/input/qwen2.5-3b-instruct'  (None = DSL-only Phase A)\n"
@@ -80,6 +102,8 @@ def build() -> Path:
     nb = {
         "cells": [
             {"cell_type": "markdown", "metadata": {}, "source": _lines(INTRO)},
+            {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [],
+             "source": _lines(ENV_PREP_SRC)},
             {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [],
              "source": _lines(_bootstrap_source(files))},
             {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [],

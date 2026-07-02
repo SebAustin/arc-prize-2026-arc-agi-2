@@ -23,11 +23,12 @@ ensemble.
 3. Notebook Settings (right panel):
    - **Accelerator**: GPU T4×2 or L4×4 (either works for Phase A; DSL-only is CPU-cheap).
    - **Internet**: **Off**.
-   - Competition data is auto-attached on a competition notebook (confirm
-     `/kaggle/input/arc-prize-2026-arc-agi-2/` is listed under Input).
-4. Leave cell 3's `MODEL_DS = None` (default — do not edit unless doing Phase B).
-5. **Run All**.
-6. Confirm cell 4 prints `problems: []` and `/kaggle/working/submission.json` exists.
+   - Competition data is auto-attached on a competition notebook (confirm a
+     `arc-prize-2026-arc-agi-2` folder is listed under Input; Kaggle may mount it
+     under `/kaggle/input/competitions/…` — the code auto-detects either).
+4. Leave the **config cell**'s `MODEL_DS = None` (default — do not edit unless doing Phase B).
+5. **Run All** (the first code cell auto-removes an incompatible `torchao` if present — see §7).
+6. Confirm the **run cell** prints `problems: []` and `/kaggle/working/submission.json` exists.
 
 That's a valid, scoreable (DSL-only) submission. Go to §6 for the gated submit step,
 or continue to §3 Phase B for a real TTT score.
@@ -45,8 +46,11 @@ or continue to §3 Phase B for a real TTT score.
       internet needed at run time, since Kaggle stages Model assets locally). Note
       the mount path it reports, e.g. `/kaggle/input/qwen2.5-3b-instruct/transformers/...`.
 - [ ] Licensing: everything staged must be open-source-compatible (Apache/MIT/CC-BY)
-      for **prize eligibility**. Qwen2.5 is Apache-2.0 — qualifies. Do not swap in a
-      non-permissive model without re-checking eligibility.
+      for **prize eligibility**. ⚠️ Most Qwen2.5 sizes are Apache-2.0, but the **3B**
+      variants (general *and* Coder) are under the **Qwen Research License — NOT
+      prize-eligible**. For a prize submission use an Apache-2.0 size:
+      Qwen2.5-Coder-**7B**-Instruct (fits one L4) or **1.5B**. The 3B is fine only for
+      leaderboard/testing. Re-check any non-Qwen model before swapping it in.
 - [ ] (Optional, Phase B extra) a base-fine-tune LoRA adapter trained on the synthetic
       corpus via `src/arc/train/finetune.py`, staged as its own Kaggle Dataset, if you
       want `ADAPTER_DS` populated.
@@ -56,10 +60,11 @@ or continue to §3 Phase B for a real TTT score.
 ## 3. Path A — self-contained notebook (recommended)
 
 `notebooks/submission_selfcontained.ipynb` base64-embeds the entire `arc` package plus
-`scripts/kaggle_submit.py` in cell 2 (the "bootstrap" cell), so the kernel needs no
-code dataset and no Kaggle API token. It has exactly 4 cells: intro (markdown) →
-bootstrap (writes the embedded package to `/kaggle/working/arc_code`, adds it to
-`sys.path`) → config (`MODEL_DS`, `ADAPTER_DS`) → run (`kaggle_submit.main(...)`).
+`scripts/kaggle_submit.py` in the "bootstrap" cell, so the kernel needs no code dataset
+and no Kaggle API token. It has 5 cells: intro (markdown) → **env-prep** (removes an
+incompatible `torchao` so PEFT/LoRA can run — see §7) → bootstrap (writes the embedded
+package to `/kaggle/working/arc_code`, adds it to `sys.path`) → config (`MODEL_DS`,
+`ADAPTER_DS`) → run (`kaggle_submit.main(...)`).
 
 ### 3.0 Regenerate before every deploy if `src/` changed (REQUIRED)
 
@@ -93,11 +98,12 @@ diff-worthy the same way a stale build artifact would be in any other pipeline.
 
 ### 3.2 Phase B — attach the model for a real TTT score
 
-1. Notebook editor → **Add Input** → **Models** tab → search `Qwen2.5-3B-Instruct`
-   → **Add**. Kaggle mounts it read-only; copy the exact path shown (varies by
-   variant/framework selected, typically
-   `/kaggle/input/qwen2.5/transformers/3b-instruct/<version>`).
-2. Edit cell 3 (config) only:
+1. Notebook editor → **Add Input** → **Models** tab → search for an **Apache-2.0**
+   Qwen2.5 size — **Qwen2.5-Coder-7B-Instruct** (recommended) or **1.5B**; avoid the
+   3B (Qwen Research License, not prize-eligible) → **Add**. Kaggle mounts it read-only;
+   copy the exact path shown (varies by variant/framework, typically
+   `/kaggle/input/<owner>/<model>/transformers/<variant>/<version>`).
+2. Edit the **config cell** only:
    ```python
    MODEL_DS = '/kaggle/input/qwen2.5/transformers/3b-instruct/1'   # <- your mount path
    ADAPTER_DS = None   # or '/kaggle/input/<your-adapter-dataset>' if you built one
@@ -162,7 +168,8 @@ scoring condition — never gate on an internet-enabled run).
 | # | Check | How to verify | Pass condition |
 |---|-------|----------------|-----------------|
 | 1 | Model loads from mount (Phase B only) | Log line `mode=KAGGLE ... model_path=/kaggle/input/...` and `ensemble: DSL + heuristics + TTT(LoRA)` with no exception | No traceback; ensemble line printed |
-| 2 | Submission written & schema-clean | Log line `submission: /kaggle/working/submission.json  schema_problems=0` | `schema_problems=0` (cell 4 also hard-asserts this) |
+| 2 | Submission written & schema-clean | Log line `submission: /kaggle/working/submission.json  schema_problems=0` | `schema_problems=0` (the run cell also hard-asserts this) |
+| 2b | TTT actually ran (not silently degraded) | No repeated `solver llm_ttt failed …` lines in the log | zero TTT failures — if you see them, check §7 torchao |
 | 3 | Wall-clock comfortably under 12 h | Log line `elapsed: NN.N min  (N.Ns/task)` | Total run (incl. model load) < ~10–10.5 h observed, matching the 11 h internal budget in `config.py` with margin left over |
 | 4 | Accelerator = GPU | Notebook Settings panel | GPU L4×4 (or T4×2) selected, not CPU |
 | 5 | Internet = Off | Notebook Settings panel | Toggled Off — this is the actual scoring condition; an internet-enabled dry run does not validate offline behavior |
@@ -207,6 +214,21 @@ back — only a choice of which submission "counts."
 
 ## 7. Troubleshooting
 
+**TTT silently disabled — repeated `solver llm_ttt failed …` + `ImportError: incompatible
+version of torchao` (run finishes in seconds, DSL-only score)**
+- Cause: the Kaggle image ships a `torchao` (e.g. 0.10.0) older than the installed
+  `peft` requires (>0.16), so `get_peft_model()` raises on every task. The pipeline
+  catches it and degrades to the DSL/heuristic ensemble — you get a valid but
+  weak submission and the log fills with the failure (which is how you spot it).
+- Fix: the notebook's **env-prep cell** now removes the incompatible `torchao`
+  automatically (we don't use it). If you're on an older notebook, add a first cell:
+  ```python
+  import subprocess, sys
+  subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"], check=False)
+  ```
+  then **Factory reset → Run All** (the reset clears the already-imported broken `peft`).
+  `pip uninstall` needs no internet.
+
 **`FileNotFoundError` on `load_challenges` (path points at a local/developer folder)**
 - Cause: the **competition data isn't attached to the notebook**, so nothing mounts under
   `/kaggle/input/arc-prize-2026-arc-agi-2/`. The entrypoint now fails fast with an
@@ -217,7 +239,7 @@ back — only a choice of which submission "counts."
 - `config.py` auto-detects the data folder wherever Kaggle mounts it (it scans
   `/kaggle/input/*` for the challenges file), and on Kaggle it never falls back to a
   developer-machine path. If your data lives somewhere non-standard, set `ARC_DATA_DIR`
-  in cell 3 to the folder containing `arc-agi_test_challenges.json`.
+  in the config cell to the folder containing `arc-agi_test_challenges.json`.
 
 **OOM (CUDA out of memory)**
 - Confirm accelerator is actually GPU (not CPU) and the right count (L4×4).
@@ -229,7 +251,7 @@ back — only a choice of which submission "counts."
   CC-BY licensing (§2) before swapping.
 
 **Timeouts (run not finishing inside 12 h, or a handful of tasks eating the budget)**
-- Lower `per_task_budget_s` passed to `main()` (default 150.0s / cell 4's
+- Lower `per_task_budget_s` passed to `main()` (default 150.0s / the run cell's
   `per_task_budget_s=150.0`) — this is a *per-task* cap enforced by the shared time
   watchdog in `arc/pipeline.py`, so lowering it trades score for safety margin.
 - Lower `num_augs` in `DEFAULT_LLM_KWARGS` (default 8) or
