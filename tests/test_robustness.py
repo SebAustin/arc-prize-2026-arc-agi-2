@@ -10,6 +10,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 import arc.pipeline as pipeline_mod
 from arc.io.submission import FALLBACK_GRID, fallback_from_raw
 from arc.pipeline import run, solve_task
@@ -149,3 +151,16 @@ def test_entrypoint_keeps_fallback_on_malformed_file(tmp_path, monkeypatch):
     loaded = json.loads(sub.read_text())
     assert "t1" in loaded  # task still present -> submission is scoreable
     assert result["num_tasks"] == 0  # graceful degrade, no crash
+
+
+def test_entrypoint_errors_clearly_when_data_missing(tmp_path, monkeypatch):
+    # data dir exists but has NO challenges file (e.g. competition not attached)
+    data, out = tmp_path / "data", tmp_path / "out"
+    data.mkdir()
+    out.mkdir()
+    monkeypatch.setenv("ARC_MODE", "SMOKE")
+    monkeypatch.setenv("ARC_DATA_DIR", str(data))
+    monkeypatch.setenv("ARC_OUTPUT_DIR", str(out))
+    with pytest.raises(FileNotFoundError) as ei:
+        _load_entrypoint().main()
+    assert "Competition data not found" in str(ei.value)  # actionable, not cryptic

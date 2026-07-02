@@ -32,6 +32,26 @@ from arc.io.submission import (
 from arc.pipeline import run as run_pipeline
 
 
+def _require_data(challenges_path) -> None:
+    """Fail fast with an actionable message if the competition data is missing —
+    the common cause is simply that the competition dataset was never attached to
+    the notebook, which otherwise surfaces as a cryptic FileNotFoundError."""
+    if os.path.exists(challenges_path):
+        return
+    inp = "/kaggle/input"
+    mounted = sorted(os.listdir(inp)) if os.path.isdir(inp) else []
+    listing = "\n".join(f"    - {inp}/{m}" for m in mounted) or (
+        "    (nothing mounted under /kaggle/input)"
+    )
+    raise FileNotFoundError(
+        f"Competition data not found: {challenges_path}\n"
+        f"On Kaggle: use Add Input -> Competitions -> 'ARC Prize 2026 - ARC-AGI-2' "
+        f"so the data mounts under /kaggle/input/. Or set ARC_DATA_DIR to the folder "
+        f"that contains {os.path.basename(str(challenges_path))}.\n"
+        f"Currently mounted under /kaggle/input:\n{listing}"
+    )
+
+
 def _pre_write_fallback(challenges_path, submission_path) -> int:
     """Write a complete, schema-valid fallback submission BEFORE any parsing or
     model work, so a crash/OOM anywhere downstream still leaves a scoreable file
@@ -94,6 +114,7 @@ def main(
     print(f"adapter_path={adapter_path}  use_ttt={use_ttt}")
 
     challenges_path = cfg.challenges_path("test")
+    _require_data(challenges_path)  # clear error if the data isn't attached
     covered = _pre_write_fallback(challenges_path, cfg.submission_path)
     print(f"pre-wrote fallback submission for {covered} tasks -> {cfg.submission_path}")
 
