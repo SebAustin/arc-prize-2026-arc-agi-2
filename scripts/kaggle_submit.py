@@ -129,12 +129,20 @@ def main(
 
     solvers = None
     if model_path:
-        from arc.solvers.llm import HFModel  # lazy: imports torch
+        try:
+            from arc.solvers.llm import HFModel  # lazy: imports torch
 
-        # adapter_path = the base-fine-tuned (synthetic-corpus) adapter; TTT
-        # adapts further on top of it per task.
-        model = HFModel(model_path, adapter_path=adapter_path)
-        solvers = _build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS)
+            # adapter_path = the base-fine-tuned (synthetic-corpus) adapter; TTT
+            # adapts further on top of it per task.
+            model = HFModel(model_path, adapter_path=adapter_path)
+            solvers = _build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS)
+        except Exception as exc:  # noqa: BLE001
+            # A model that can't load (no GPU -> "Torch not compiled with CUDA
+            # enabled", OOM, bad path) must NOT sink the run: fall back to the
+            # CPU-safe DSL/heuristic ensemble instead of crashing with an
+            # all-fallback (1x1-zero) submission that scores 0.
+            print(f"WARNING: model load failed ({exc}); falling back to DSL ensemble")
+            solvers = None
     else:
         print("WARNING: no model_path — running DSL/heuristic ensemble only")
 

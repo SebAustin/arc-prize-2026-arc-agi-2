@@ -153,6 +153,25 @@ def test_entrypoint_keeps_fallback_on_malformed_file(tmp_path, monkeypatch):
     assert result["num_tasks"] == 0  # graceful degrade, no crash
 
 
+def test_entrypoint_falls_back_to_dsl_when_model_load_fails(tmp_path, monkeypatch):
+    # model_path is set but the model can't load (locally: torch absent; on Kaggle
+    # with no GPU: "Torch not compiled with CUDA enabled"). Must degrade to the
+    # DSL ensemble and still write a real submission — never crash into all-zeros.
+    challenges = {
+        "t1": {
+            "train": [{"input": [[1, 2], [3, 4]], "output": [[3, 4], [1, 2]]}],
+            "test": [{"input": [[5, 6], [7, 8]]}],
+        }
+    }
+    sub = _env(monkeypatch, tmp_path, challenges)
+    result = _load_entrypoint().main(model_path="/nonexistent/model")
+    assert sub.exists()
+    loaded = json.loads(sub.read_text())
+    assert loaded["t1"][0]["attempt_1"]  # a real submission was produced
+    assert result["problems"] == []  # DSL fallback -> schema-clean, no crash
+    assert result["num_tasks"] == 1
+
+
 def test_entrypoint_errors_clearly_when_data_missing(tmp_path, monkeypatch):
     # data dir exists but has NO challenges file (e.g. competition not attached)
     data, out = tmp_path / "data", tmp_path / "out"
