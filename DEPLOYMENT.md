@@ -66,6 +66,26 @@ incompatible `torchao` so PEFT/LoRA can run — see §7) → bootstrap (writes t
 package to `/kaggle/working/arc_code`, adds it to `sys.path`) → config (`MODEL_DS`,
 `ADAPTER_DS`) → run (`kaggle_submit.main(...)`).
 
+**Canary-first workflow (recommended before any full run):** set `MAX_TASKS = 8` in the
+config cell (optionally `ttt_config={'max_steps': 16}` in the run cell) → a ~20-30 min
+run validates GPU presence, model load, and TTT end-to-end. The canary's
+`submission.json` is still schema-complete (unsolved tasks keep the fallback grid).
+Check the log for `GPU N:` lines (nvidia-smi), `HFModel: loading ... dtype=...`, no
+`solver llm_ttt failed` lines, and `schema_problems=0` — then flip `MAX_TASKS = None`
+for the full scored run. Two earlier 10-hour-scale failures (accelerator off; torchao
+conflict) would each have been caught by a 20-minute canary.
+
+**Pushing via the API (`kaggle kernels push`) — two landmines (learned the hard way):**
+- `--accelerator` **overrides** `enable_gpu` from the metadata, and the server
+  **silently accepts invalid names** — a typo yields a CPU-only run with no error.
+  Only `NvidiaTeslaT4` and `NvidiaTeslaP100` are documented/valid GPU names; the
+  **L4×4 enum name is not exposed by the API** — L4×4 can only be selected in the
+  notebook UI (Settings → Accelerator), after which it persists for future versions.
+- A pulled `kernel-metadata.json` may contain `"machine_shape": "None"` (a literal
+  string) — **delete that key before pushing** or it can override `enable_gpu: true`.
+- The model is hardware-adaptive either way: bf16 on L4/A100, fp16 on T4/P100, and
+  `device_map="auto"` shards a 7B across multiple cards (2×T4 works).
+
 ### 3.0 Regenerate before every deploy if `src/` changed (REQUIRED)
 
 The notebook is a build artifact, not hand-maintained source. **Never hand-edit
