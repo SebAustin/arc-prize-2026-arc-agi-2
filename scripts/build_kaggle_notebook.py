@@ -59,6 +59,9 @@ ENV_PREP_SRC = (
     "# degrades to the DSL-only ensemble. We don't use torchao, so drop the\n"
     "# incompatible version and let peft fall back to the standard LoRA path.\n"
     "import sys, subprocess\n"
+    "# GPU visibility check FIRST: if this prints nothing/fails, the accelerator is\n"
+    "# OFF -> fix Settings > Accelerator before wasting a run (the model can't load).\n"
+    "subprocess.run(['nvidia-smi', '-L'], check=False)\n"
     "try:\n"
     "    import torchao\n"
     "    from packaging.version import parse as _p\n"
@@ -78,12 +81,14 @@ CONFIG_SRC = (
     "# Point these at your attached datasets/models.\n"
     "MODEL_DS = None      # e.g. '/kaggle/input/qwen2.5-3b-instruct'  (None = DSL-only Phase A)\n"
     "ADAPTER_DS = None    # e.g. '/kaggle/input/arc-base-ft-adapter'  (optional)\n"
+    "MAX_TASKS = None     # e.g. 8 = CANARY (validate GPU+model+TTT in ~20 min);\n"
+    "                     # None = full scored run. Canary output is still schema-complete.\n"
 )
 
 RUN_SRC = (
     "from kaggle_submit import main\n"
     "result = main(model_path=MODEL_DS, adapter_path=ADAPTER_DS,\n"
-    "              per_task_budget_s=150.0, use_ttt=True)\n"
+    "              per_task_budget_s=150.0, use_ttt=True, max_tasks=MAX_TASKS)\n"
     "print(result)\n"
     "assert result['problems'] == [], result['problems']\n"
 )

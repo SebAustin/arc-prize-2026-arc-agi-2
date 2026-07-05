@@ -17,6 +17,7 @@ Usage (inside the Kaggle notebook):
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import time
@@ -25,6 +26,7 @@ from arc.config import get_config
 from arc.io.loader import MalformedTaskError, load_challenges
 from arc.io.submission import (
     build_submission,
+    empty_predictions,
     fallback_from_raw,
     validate_submission,
     write_submission,
@@ -106,7 +108,15 @@ def main(
     per_task_budget_s: float = 150.0,
     llm_kwargs: dict | None = None,
     use_ttt: bool = True,
+    max_tasks: int | None = None,
 ) -> dict:
+    """Run the ensemble over the test challenges and write submission.json.
+
+    `max_tasks=N` runs a CANARY: only the first N tasks are solved (validating
+    GPU + model load + TTT end-to-end in minutes instead of hours) while the
+    written submission still covers every task (unsolved ones keep the fallback
+    grid), so the output file is always schema-complete.
+    """
     cfg = get_config()
     model_path = model_path or os.environ.get("ARC_MODEL_PATH")
     adapter_path = adapter_path or os.environ.get("ARC_ADAPTER_PATH")
@@ -119,13 +129,19 @@ def main(
     print(f"pre-wrote fallback submission for {covered} tasks -> {cfg.submission_path}")
 
     try:
-        tasks = load_challenges(challenges_path)
+        tasks_all = load_challenges(challenges_path)
     except MalformedTaskError as exc:
         # The pre-written fallback is already a complete, scoreable submission;
         # keep it rather than crashing the kernel with an empty output.
         print(f"ERROR: could not parse challenges ({exc}); keeping fallback submission")
         return {"problems": [str(exc)], "elapsed_s": 0.0, "num_tasks": 0}
-    print(f"loaded {len(tasks)} test tasks")
+    print(f"loaded {len(tasks_all)} test tasks")
+
+    tasks = tasks_all
+    if max_tasks is not None and max_tasks < len(tasks_all):
+        tasks = dict(itertools.islice(tasks_all.items(), max_tasks))
+        print(f"CANARY: solving only {len(tasks)}/{len(tasks_all)} tasks "
+              f"(submission stays schema-complete; unsolved keep the fallback)")
 
     solvers = None
     if model_path:
@@ -156,8 +172,16 @@ def main(
     )
     elapsed = time.monotonic() - t0
 
+    if len(tasks) < len(tasks_all):
+        # Canary run: merge the solved subset over a full fallback set so the
+        # file on disk covers every task_id (schema-complete, scoreable).
+        full = empty_predictions(tasks_all)
+        full.update(predictions)
+        predictions = full
+        write_submission(build_submission(predictions), cfg.submission_path)
+
     submission = build_submission(predictions)
-    problems = validate_submission(submission, tasks)
+    problems = validate_submission(submission, tasks_all)
     print(f"submission: {cfg.submission_path}  schema_problems={len(problems)}")
     for p in problems[:5]:
         print("  -", p)
@@ -175,10 +199,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable test-time training (plain LLM transduction).",
     )
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Canary: solve only the first N tasks (submission stays complete).",
+    )
     args = parser.parse_args()
     main(
         model_path=args.model_path,
         adapter_path=args.adapter_path,
         per_task_budget_s=args.per_task_budget,
         use_ttt=not args.no_ttt,
+        max_tasks=args.max_tasks,
     )

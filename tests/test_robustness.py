@@ -172,6 +172,29 @@ def test_entrypoint_falls_back_to_dsl_when_model_load_fails(tmp_path, monkeypatc
     assert result["num_tasks"] == 1
 
 
+def test_entrypoint_canary_max_tasks_keeps_submission_complete(tmp_path, monkeypatch):
+    # max_tasks=1 solves only the first task, but the written submission must
+    # still cover EVERY task_id (unsolved keep the 1x1 fallback grid).
+    challenges = {
+        "solved": {
+            "train": [{"input": [[1, 2], [3, 4]], "output": [[1, 2], [3, 4]]}],
+            "test": [{"input": [[5, 6], [7, 8]]}],
+        },
+        "untouched": {
+            "train": [{"input": [[1]], "output": [[2]]}],
+            "test": [{"input": [[3]]}],
+        },
+    }
+    sub = _env(monkeypatch, tmp_path, challenges)
+    result = _load_entrypoint().main(max_tasks=1)
+    loaded = json.loads(sub.read_text())
+    assert set(loaded) == {"solved", "untouched"}  # schema-complete
+    assert loaded["solved"][0]["attempt_1"] == [[5, 6], [7, 8]]  # identity solved
+    assert loaded["untouched"][0]["attempt_1"] == [[0]]  # fallback retained
+    assert result["problems"] == []  # validates against the FULL task set
+    assert result["num_tasks"] == 1  # only the canary subset was solved
+
+
 def test_entrypoint_errors_clearly_when_data_missing(tmp_path, monkeypatch):
     # data dir exists but has NO challenges file (e.g. competition not attached)
     data, out = tmp_path / "data", tmp_path / "out"
