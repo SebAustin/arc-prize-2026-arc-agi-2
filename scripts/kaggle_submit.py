@@ -80,7 +80,7 @@ DEFAULT_LLM_KWARGS = {
 DEFAULT_TTT_DATA_KWARGS = {"num_augs": 16, "max_examples": 250}
 
 
-def _build_solvers(model, use_ttt: bool, llm_kwargs: dict):
+def _build_solvers(model, use_ttt: bool, llm_kwargs: dict, ttt_config: dict | None = None):
     """Assemble the GPU ensemble: DSL + heuristics + (TTT or plain LLM)."""
     from arc.solvers.dsl.solver import DSLSolver
     from arc.solvers.identity import CHEAP_SOLVERS
@@ -89,7 +89,7 @@ def _build_solvers(model, use_ttt: bool, llm_kwargs: dict):
         from arc.solvers.llm import LoraTTTRunner, TTTConfig, TTTSolver
 
         ttt = TTTSolver(
-            LoraTTTRunner(model, TTTConfig()),
+            LoraTTTRunner(model, TTTConfig(**(ttt_config or {}))),
             llm_kwargs=llm_kwargs,
             ttt_data_kwargs=DEFAULT_TTT_DATA_KWARGS,
         )
@@ -109,13 +109,15 @@ def main(
     llm_kwargs: dict | None = None,
     use_ttt: bool = True,
     max_tasks: int | None = None,
+    ttt_config: dict | None = None,
 ) -> dict:
     """Run the ensemble over the test challenges and write submission.json.
 
     `max_tasks=N` runs a CANARY: only the first N tasks are solved (validating
     GPU + model load + TTT end-to-end in minutes instead of hours) while the
     written submission still covers every task (unsolved ones keep the fallback
-    grid), so the output file is always schema-complete.
+    grid), so the output file is always schema-complete. `ttt_config` overrides
+    TTTConfig fields (e.g. {"max_steps": 16} for a faster canary).
     """
     cfg = get_config()
     model_path = model_path or os.environ.get("ARC_MODEL_PATH")
@@ -151,7 +153,9 @@ def main(
             # adapter_path = the base-fine-tuned (synthetic-corpus) adapter; TTT
             # adapts further on top of it per task.
             model = HFModel(model_path, adapter_path=adapter_path)
-            solvers = _build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS)
+            solvers = _build_solvers(
+                model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config
+            )
         except Exception as exc:  # noqa: BLE001
             # A model that can't load (no GPU -> "Torch not compiled with CUDA
             # enabled", OOM, bad path) must NOT sink the run: fall back to the

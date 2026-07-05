@@ -13,12 +13,15 @@ completion's log-likelihood) plus two implementations:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from ...io.grid import Grid
 from ...serialize.prompt import extract_last_input
 from ...serialize.tokenizer import grid_to_str
+
+_log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -81,27 +84,55 @@ class MockModel:
         return 0.0 if completion.strip() == target.strip() else -1.0
 
 
+def _resolve_dtype(torch_module, override: str | None) -> str:
+    """Pick the compute dtype for the current hardware.
+
+    Priority: explicit `override` arg > `ARC_MODEL_DTYPE` env var > bfloat16 where
+    the GPU supports it (Ampere/Ada: A100, L4, ...) > float16 (Turing/Pascal:
+    T4, P100 have no bf16 — hardcoding bfloat16 there breaks or crawls).
+    """
+    import os  # noqa: PLC0415
+
+    choice = override or os.environ.get("ARC_MODEL_DTYPE")
+    if choice:
+        return choice
+    try:
+        if torch_module.cuda.is_available() and torch_module.cuda.is_bf16_supported():
+            return "bfloat16"
+    except Exception:  # pragma: no cover — exotic torch builds
+        pass
+    return "float16"
+
+
 class HFModel:
-    """HuggingFace causal-LM backend (Kaggle/GPU). Lazy torch import."""
+    """HuggingFace causal-LM backend (Kaggle/GPU). Lazy torch import.
+
+    `device_map="auto"` shards the model across all visible GPUs (2xT4, 4xL4, ...)
+    so a 7B fits environments where a single card would OOM; on one GPU it
+    behaves as before. Dtype auto-selects bf16 only where supported.
+    """
 
     def __init__(
         self,
         model_path: str,
         device: str = "cuda",
-        dtype: str = "bfloat16",
+        dtype: str | None = None,
         adapter_path: str | None = None,
+        device_map: str = "auto",
     ):
         import torch  # noqa: PLC0415 — lazy: only present in the GPU env
         from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: PLC0415
 
         self._torch = torch
+        dtype = _resolve_dtype(torch, dtype)
+        _log.info("loading %s dtype=%s device_map=%s", model_path, dtype, device_map)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=getattr(torch, dtype),
-            device_map=device,
+            device_map=device_map,
             use_safetensors=True,  # refuse pickle .bin checkpoints (RCE surface)
         )
         if adapter_path is not None:
@@ -109,6 +140,8 @@ class HFModel:
 
             self.model = PeftModel.from_pretrained(self.model, adapter_path)
         self.model.eval()
+        # Input tensors go to the embedding layer's device (cuda:0 under
+        # device_map="auto"); accelerate hooks route activations across shards.
         self.device = device
 
     def generate(
