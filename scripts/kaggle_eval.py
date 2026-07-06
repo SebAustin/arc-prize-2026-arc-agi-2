@@ -23,10 +23,8 @@ from arc.eval.harness import load_split
 from arc.eval.metrics import score_predictions
 from arc.io.grid import grids_equal
 from arc.pipeline import solve_task
-from kaggle_submit import (
-    DEFAULT_LLM_KWARGS,
-    _build_solvers,
-)
+from arc.solvers.factory import build_solvers
+from kaggle_submit import DEFAULT_LLM_KWARGS
 
 
 def _task_solved(attempts, expected) -> bool:
@@ -68,7 +66,7 @@ def main(
         from arc.solvers.llm import HFModel  # noqa: PLC0415 — lazy: imports torch
 
         model = HFModel(model_path, adapter_path=adapter_path)
-        solvers = _build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config)
+        solvers = build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config)
     else:
         from arc.pipeline import default_solvers  # noqa: PLC0415
 

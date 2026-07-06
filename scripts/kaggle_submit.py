@@ -32,7 +32,10 @@ from arc.io.submission import (
     validate_submission,
     write_submission,
 )
+from arc.parallel import run_parallel
 from arc.pipeline import run as run_pipeline
+from arc.solvers.factory import DEFAULT_TTT_DATA_KWARGS as factory_ttt_data_kwargs
+from arc.solvers.factory import build_solvers
 
 
 def _require_data(challenges_path) -> None:
@@ -80,8 +83,11 @@ DEFAULT_LLM_KWARGS = {
     # forward passes per test output (~1-2 s) for a materially better ordering.
     "use_likelihood": True,
 }
-# Corpus size for per-task test-time training (leave-one-out x augmentation).
-DEFAULT_TTT_DATA_KWARGS = {"num_augs": 16, "max_examples": 250}
+# Corpus size for per-task test-time training (leave-one-out x augmentation) —
+# owned by arc.solvers.factory (shared with worker processes); re-exported here
+# for backward-compat import paths (e.g. `from kaggle_submit import
+# DEFAULT_TTT_DATA_KWARGS`).
+DEFAULT_TTT_DATA_KWARGS = factory_ttt_data_kwargs
 
 # sha256 of the PUBLIC placeholder arc-agi_test_challenges.json. During "Save &
 # Run All" (commit) Kaggle runs against this placeholder — a full 10 h pass there
@@ -100,26 +106,10 @@ def _sha256_file(path) -> str:
     return h.hexdigest()
 
 
-def _build_solvers(model, use_ttt: bool, llm_kwargs: dict, ttt_config: dict | None = None):
-    """Assemble the GPU ensemble: DSL + heuristics + (TTT or plain LLM)."""
-    from arc.solvers.dsl.solver import DSLSolver
-    from arc.solvers.identity import CHEAP_SOLVERS
-
-    if use_ttt:
-        from arc.solvers.llm import LoraTTTRunner, TTTConfig, TTTSolver
-
-        ttt = TTTSolver(
-            LoraTTTRunner(model, TTTConfig(**(ttt_config or {}))),
-            llm_kwargs=llm_kwargs,
-            ttt_data_kwargs=DEFAULT_TTT_DATA_KWARGS,
-        )
-        print("ensemble: DSL + heuristics + TTT(LoRA)")
-        return [DSLSolver(), *CHEAP_SOLVERS, ttt]
-
-    from arc.solvers.llm import LLMSolver
-
-    print("ensemble: DSL + heuristics + LLM(HFModel)")
-    return [DSLSolver(), *CHEAP_SOLVERS, LLMSolver(model, **llm_kwargs)]
+# Backward-compat alias: `_build_solvers` moved to `arc.solvers.factory.build_solvers`
+# (Rung 3 — shared by the sequential and parallel-worker entrypoints). Kept here
+# so existing imports/tests (and scripts/kaggle_eval.py) keep working unchanged.
+_build_solvers = build_solvers
 
 
 def main(
@@ -130,6 +120,7 @@ def main(
     use_ttt: bool = True,
     max_tasks: int | None = None,
     ttt_config: dict | None = None,
+    num_workers: int = 0,
 ) -> dict:
     """Run the ensemble over the test challenges and write submission.json.
 
@@ -138,6 +129,12 @@ def main(
     written submission still covers every task (unsolved ones keep the fallback
     grid), so the output file is always schema-complete. `ttt_config` overrides
     TTTConfig fields (e.g. {"max_steps": 16} for a faster canary).
+
+    `num_workers>1` fans out across that many processes, each holding one FULL
+    model replica pinned to its own GPU (see `arc.parallel.run_parallel`) —
+    the Rung 3 multi-GPU path for hardware like Kaggle's L4x4. The default
+    `num_workers=0` (or 1, or no `model_path`) keeps the sequential
+    single-process path — the kill-switch if the parallel path misbehaves.
     """
     cfg = get_config()
     model_path = model_path or os.environ.get("ARC_MODEL_PATH")
@@ -180,35 +177,55 @@ def main(
         print(f"CANARY: solving only {len(tasks)}/{len(tasks_all)} tasks "
               f"(submission stays schema-complete; unsolved keep the fallback)")
 
-    solvers = None
-    if model_path:
-        try:
-            from arc.solvers.llm import HFModel  # lazy: imports torch
-
-            # adapter_path = the base-fine-tuned (synthetic-corpus) adapter; TTT
-            # adapts further on top of it per task.
-            model = HFModel(model_path, adapter_path=adapter_path)
-            solvers = _build_solvers(
-                model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config
-            )
-        except Exception as exc:  # noqa: BLE001
-            # A model that can't load (no GPU -> "Torch not compiled with CUDA
-            # enabled", OOM, bad path) must NOT sink the run: fall back to the
-            # CPU-safe DSL/heuristic ensemble instead of crashing with an
-            # all-fallback (1x1-zero) submission that scores 0.
-            print(f"WARNING: model load failed ({exc}); falling back to DSL ensemble")
-            solvers = None
-    else:
-        print("WARNING: no model_path — running DSL/heuristic ensemble only")
-
     t0 = time.monotonic()
-    predictions = run_pipeline(
-        tasks,
-        solvers=solvers,
-        output_path=cfg.submission_path,
-        per_task_budget_s=per_task_budget_s,
-        verbose=True,
-    )
+    if model_path and num_workers > 1:
+        # Rung 3: N worker processes, each a full model replica pinned to one
+        # GPU (arc.parallel), instead of one model sharded across every GPU.
+        print(f"num_workers={num_workers}: routing to the multi-process parallel path")
+        worker_config = {
+            "model_path": model_path,
+            "adapter_path": adapter_path,
+            "use_ttt": use_ttt,
+            "llm_kwargs": llm_kwargs or DEFAULT_LLM_KWARGS,
+            "ttt_config": ttt_config,
+        }
+        predictions = run_parallel(
+            tasks,
+            worker_config,
+            output_path=cfg.submission_path,
+            num_workers=num_workers,
+            per_task_budget_s=per_task_budget_s,
+        )
+    else:
+        solvers = None
+        if model_path:
+            try:
+                from arc.solvers.llm import HFModel  # lazy: imports torch
+
+                # adapter_path = the base-fine-tuned (synthetic-corpus)
+                # adapter; TTT adapts further on top of it per task.
+                model = HFModel(model_path, adapter_path=adapter_path)
+                solvers = _build_solvers(
+                    model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A model that can't load (no GPU -> "Torch not compiled with
+                # CUDA enabled", OOM, bad path) must NOT sink the run: fall
+                # back to the CPU-safe DSL/heuristic ensemble instead of
+                # crashing with an all-fallback (1x1-zero) submission that
+                # scores 0.
+                print(f"WARNING: model load failed ({exc}); falling back to DSL ensemble")
+                solvers = None
+        else:
+            print("WARNING: no model_path — running DSL/heuristic ensemble only")
+
+        predictions = run_pipeline(
+            tasks,
+            solvers=solvers,
+            output_path=cfg.submission_path,
+            per_task_budget_s=per_task_budget_s,
+            verbose=True,
+        )
     elapsed = time.monotonic() - t0
 
     if len(tasks) < len(tasks_all):
@@ -244,6 +261,16 @@ if __name__ == "__main__":
         default=None,
         help="Canary: solve only the first N tasks (submission stays complete).",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help=(
+            "Fan out across this many processes, each a full model replica "
+            "pinned to one GPU (e.g. 4 on Kaggle L4x4). 0/1 = sequential "
+            "single-process path (default; kill-switch)."
+        ),
+    )
     args = parser.parse_args()
     main(
         model_path=args.model_path,
@@ -251,4 +278,5 @@ if __name__ == "__main__":
         per_task_budget_s=args.per_task_budget,
         use_ttt=not args.no_ttt,
         max_tasks=args.max_tasks,
+        num_workers=args.num_workers,
     )

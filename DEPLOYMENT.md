@@ -140,6 +140,48 @@ diff-worthy the same way a stale build artifact would be in any other pipeline.
 Cell 4 always runs `assert result['problems'] == [], result['problems']` — a non-empty
 `problems` list fails the cell loudly rather than silently shipping a bad file.
 
+### 3.3 Multi-GPU full runs (Rung 3 — L4×4)
+
+By default a single model replica is sharded across every visible GPU
+(`HFModel(device_map="auto")`), which wastes 3 of 4 L4 cards on a 7B model that
+fits comfortably on ONE. `num_workers=4` instead spawns 4 processes, each
+pinned to its own GPU (`CUDA_VISIBLE_DEVICES`) with its own full model replica,
+each solving its own shard of tasks concurrently — turning ~150s/task
+(1 model, 4 idle-ish GPUs) into ~600s of effective parallel throughput.
+
+Edit the **run cell** for a full-run push:
+
+```python
+from kaggle_submit import main
+result = main(
+    model_path=MODEL_DS, adapter_path=ADAPTER_DS,
+    per_task_budget_s=575.0, use_ttt=True, max_tasks=MAX_TASKS,
+    ttt_config={"max_steps": 112},   # retuned up from the single-replica default (64)
+    num_workers=4,                    # L4x4: one full model replica per GPU
+)
+```
+
+Retuned knobs for the 4-worker path (each worker now owns a whole GPU instead
+of sharing one sharded model, so it can afford a heavier per-task budget):
+- `per_task_budget_s`: **~550-600s** (up from the single-process 150s default)
+  — each worker still solves its shard sequentially, so the parallel wall-clock
+  win comes from 4x concurrency, not from a smaller per-task budget.
+- `TTTConfig.max_steps`: **96-128** via `ttt_config={"max_steps": ...}` (up from
+  the default 64) — more LoRA fitting steps per task now fit in the budget.
+- `DEFAULT_LLM_KWARGS["num_augs"]`: **12-16** (up from 8) for a richer
+  transduction/TTT corpus per task.
+
+**Kill-switch:** `num_workers=0` (the default) always keeps the sequential
+single-process path — if the parallel path misbehaves on Kaggle (a worker
+hangs, GPU pinning doesn't take, etc.), drop `num_workers` from the run cell
+(or set it to `0`/`1`) and rerun; nothing else about the call changes. The
+parallel path shares every other invariant with the sequential one: a complete
+fallback submission is written before any worker starts, results checkpoint to
+disk every `checkpoint_every_s` (default 60s), and the global time watchdog
+(`total_budget_s`, same `TOTAL_RUNTIME_BUDGET_S` as the sequential path)
+terminates any still-running workers with a safety grace period before the
+12h hard cap.
+
 ---
 
 ## 4. Path B — code-as-dataset (alternative)
