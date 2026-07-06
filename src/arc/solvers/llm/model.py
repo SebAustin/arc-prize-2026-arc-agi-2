@@ -46,6 +46,14 @@ class LanguageModel(Protocol):
         `prompt` (higher = more likely). Used for candidate selection."""
         ...
 
+    def score_sum(self, prompt: str, completion: str) -> float:
+        """Return the SUMMED log-probability of `completion` given `prompt`.
+
+        Product-of-experts selection multiplies probabilities across prompts,
+        i.e. sums log-probs — the mean-normalized `score` cannot be summed
+        across differently-sized completions without bias."""
+        ...
+
 
 class MockModel:
     """Deterministic CPU stand-in. Predicts `transform(test_input)` for the
@@ -82,6 +90,24 @@ class MockModel:
         except Exception:
             return -1.0
         return 0.0 if completion.strip() == target.strip() else -1.0
+
+    def score_sum(self, prompt: str, completion: str) -> float:
+        # Sum-scaled variant of the pseudo-score (match -> 0.0, else -10.0), so
+        # PoE tests can add scores across augmented prompts meaningfully.
+        return 0.0 if self.score(prompt, completion) == 0.0 else -10.0
+
+    def generate_batch(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 1024,
+        temperature: float = 0.0,
+        max_time_s: float | None = None,
+    ) -> list[str]:
+        """One greedy completion per prompt (loop — parity with HFModel's API)."""
+        return [
+            self.generate(p, max_new_tokens=max_new_tokens, temperature=temperature)[0]
+            for p in prompts
+        ]
 
 
 def _resolve_dtype(torch_module, override: str | None) -> str:
@@ -180,7 +206,8 @@ class HFModel:
             completions = completions * num_samples
         return completions
 
-    def score(self, prompt: str, completion: str) -> float:
+    def _completion_logprobs(self, prompt: str, completion: str):
+        """Log-probs of exactly the completion tokens (shift-by-one aligned)."""
         torch = self._torch
         full = prompt + completion
         enc = self.tokenizer(full, return_tensors="pt").to(self.device)
@@ -190,7 +217,55 @@ class HFModel:
         log_probs = torch.log_softmax(logits[0, :-1], dim=-1)
         target_ids = enc["input_ids"][0, 1:]
         token_lp = log_probs[range(target_ids.shape[0]), target_ids]
-        completion_lp = token_lp[prompt_len - 1 :]
+        return token_lp[prompt_len - 1 :]
+
+    def score(self, prompt: str, completion: str) -> float:
+        completion_lp = self._completion_logprobs(prompt, completion)
         if completion_lp.numel() == 0:
             return float("-inf")
         return float(completion_lp.mean())
+
+    def score_sum(self, prompt: str, completion: str) -> float:
+        completion_lp = self._completion_logprobs(prompt, completion)
+        if completion_lp.numel() == 0:
+            return float("-inf")
+        return float(completion_lp.sum())
+
+    def generate_batch(
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 1024,
+        temperature: float = 0.0,
+        max_time_s: float | None = None,
+    ) -> list[str]:
+        """One completion per prompt in a single left-padded generate call.
+
+        Batching the per-augmentation decodes is a 3-5x throughput win over the
+        sequential loop; greedy-only (the production default). Left padding is
+        required for decoder-only generation so completions start aligned.
+        """
+        torch = self._torch
+        prev_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+        try:
+            inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(
+                self.device
+            )
+        finally:
+            self.tokenizer.padding_side = prev_side
+        gen_kwargs = {}
+        if max_time_s is not None and max_time_s > 0:
+            gen_kwargs["max_time"] = max_time_s
+        with torch.no_grad():
+            out = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+                **gen_kwargs,
+            )
+        padded_len = inputs["input_ids"].shape[1]
+        return [
+            self.tokenizer.decode(seq[padded_len:], skip_special_tokens=True)
+            for seq in out
+        ]
