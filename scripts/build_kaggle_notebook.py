@@ -25,8 +25,9 @@ def _collect_files() -> dict[str, str]:
     for path in sorted((REPO / "src").rglob("*.py")):
         rel = path.relative_to(REPO).as_posix()
         files[rel] = base64.b64encode(path.read_bytes()).decode("ascii")
-    entry = REPO / "scripts" / "kaggle_submit.py"
-    files["scripts/kaggle_submit.py"] = base64.b64encode(entry.read_bytes()).decode("ascii")
+    for name in ("kaggle_submit.py", "kaggle_eval.py"):
+        entry = REPO / "scripts" / name
+        files[f"scripts/{name}"] = base64.b64encode(entry.read_bytes()).decode("ascii")
     return files
 
 

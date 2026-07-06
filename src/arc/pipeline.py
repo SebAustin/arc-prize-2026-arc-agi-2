@@ -31,12 +31,15 @@ from .solvers.dsl.solver import DSLSolver
 from .solvers.identity import CHEAP_SOLVERS
 
 # Base vote weight per solver (verified solvers dominate heuristic priors).
+# identity must stay BELOW llm_ttt/2: votes decay as weight/(rank+1), so at 8.0
+# identity's rank-0 vote (8.0) outbid llm_ttt's rank-1 vote (4.5) and attempt_2
+# was routinely wasted on "output = input" — almost never right on ARC-AGI-2.
 SOLVER_WEIGHTS: dict[str, float] = {
     "dsl": 10.0,
-    "identity": 8.0,
-    "constant_output": 6.0,
-    "llm_ttt": 9.0,   # arrives in M2
-    "llm": 4.0,        # arrives in M1
+    "identity": 2.0,
+    "constant_output": 1.5,
+    "llm_ttt": 9.0,
+    "llm": 4.0,
     "majority_shape": 0.5,
 }
 _DEFAULT_WEIGHT = 1.0

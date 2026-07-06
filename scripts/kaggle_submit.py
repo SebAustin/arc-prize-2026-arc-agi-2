@@ -17,6 +17,7 @@ Usage (inside the Kaggle notebook):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -75,9 +76,28 @@ DEFAULT_LLM_KWARGS = {
     "num_samples": 1,
     "max_new_tokens": 1024,
     "temperature": 0.0,
+    # Re-rank voted candidates by the model's own log-likelihood: <=4 extra
+    # forward passes per test output (~1-2 s) for a materially better ordering.
+    "use_likelihood": True,
 }
 # Corpus size for per-task test-time training (leave-one-out x augmentation).
 DEFAULT_TTT_DATA_KWARGS = {"num_augs": 16, "max_examples": 250}
+
+# sha256 of the PUBLIC placeholder arc-agi_test_challenges.json. During "Save &
+# Run All" (commit) Kaggle runs against this placeholder — a full 10 h pass there
+# is pure waste, since only the scoring rerun (real hidden file, different hash)
+# counts. On a hash match we run a small canary instead; any mismatch (the real
+# rerun, or an updated placeholder) falls through to the FULL run — fail-safe.
+PLACEHOLDER_SHA256 = "232264c58f825ee77327dcfc9f4e5cb2f83b8d997eb69032be1bf2205bbe1a83"
+_COMMIT_CANARY_TASKS = 12
+
+
+def _sha256_file(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _build_solvers(model, use_ttt: bool, llm_kwargs: dict, ttt_config: dict | None = None):
@@ -129,6 +149,21 @@ def main(
     _require_data(challenges_path)  # clear error if the data isn't attached
     covered = _pre_write_fallback(challenges_path, cfg.submission_path)
     print(f"pre-wrote fallback submission for {covered} tasks -> {cfg.submission_path}")
+
+    # Commit fast path: don't burn ~10 GPU-h solving the public placeholder.
+    file_hash = _sha256_file(challenges_path)
+    print(f"test_challenges sha256={file_hash}")
+    if (
+        max_tasks is None
+        and file_hash == PLACEHOLDER_SHA256
+        and not os.environ.get("ARC_FORCE_FULL")
+    ):
+        max_tasks = _COMMIT_CANARY_TASKS
+        print(
+            f"COMMIT RUN detected (placeholder test file) -> canary of "
+            f"{max_tasks} tasks. The scoring rerun sees a different hash and "
+            f"runs FULL. Set ARC_FORCE_FULL=1 to override."
+        )
 
     try:
         tasks_all = load_challenges(challenges_path)

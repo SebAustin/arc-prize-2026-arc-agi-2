@@ -26,9 +26,9 @@ class _SlowRunner(MockTTTRunner):
         super().__init__(model)
         self.delay_s = delay_s
 
-    def adapt(self, examples):
+    def adapt(self, examples, deadline_s=None):
         time.sleep(self.delay_s)
-        return super().adapt(examples)
+        return super().adapt(examples, deadline_s)
 
 
 class _RaisingRunner:
@@ -37,7 +37,7 @@ class _RaisingRunner:
     def __init__(self):
         self.reset_calls = 0
 
-    def adapt(self, examples):
+    def adapt(self, examples, deadline_s=None):
         raise RuntimeError("simulated CUDA OOM during adaptation")
 
     def reset(self):
@@ -89,3 +89,28 @@ def test_reset_runs_when_adaptation_raises(grid_factory, task_factory):
     with pytest.raises(RuntimeError):
         TTTSolver(runner).solve(task, budget_s=5.0)
     assert runner.reset_calls == 1  # finally-block reset fired despite the raise
+
+
+def test_adapt_deadline_is_ttt_fraction_of_budget(grid_factory, task_factory):
+    g = grid_factory(2, 2, seed=4)
+    task = task_factory([(g, g), (g, g)], [g])
+    runner = MockTTTRunner(MockModel())
+    before = time.monotonic()
+    TTTSolver(runner, ttt_fraction=0.4).solve(task, budget_s=10.0)
+    # adapt received an absolute deadline ~= t0 + 0.4 * 10s
+    assert runner.last_deadline_s is not None
+    offset = runner.last_deadline_s - before
+    assert 3.5 <= offset <= 4.5
+
+
+def test_telemetry_populated(grid_factory, task_factory):
+    g = grid_factory(2, 2, seed=5)
+    task = task_factory([(g, g), (g, g)], [g])
+    solver = TTTSolver(MockTTTRunner(MockModel()), llm_kwargs={"num_augs": 2})
+    solver.solve(task, budget_s=5.0)
+    t = solver.last_telemetry
+    assert t["task_id"] == task.task_id
+    assert t["corpus_n"] > 0
+    assert t["augs_completed"] >= 1  # identity aug always runs
+    assert t["augs_planned"] == 2  # 2 augs x 1 test input
+    assert "adapt_s" in t and "decode_s" in t

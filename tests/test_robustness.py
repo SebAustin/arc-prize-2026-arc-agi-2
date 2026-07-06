@@ -35,6 +35,28 @@ class _StubSolver(Solver):
         return [[self.out] for _ in task.test]
 
 
+class _RankedStubSolver(Solver):
+    def __init__(self, outs, name: str):
+        self.outs = outs
+        self.name = name
+
+    def solve(self, task, budget_s: float) -> Candidates:
+        return [list(self.outs) for _ in task.test]
+
+
+def test_llm_ttt_second_choice_beats_identity_echo(grid_factory, task_factory):
+    # Regression: identity's rank-0 vote (was 8.0) used to outbid llm_ttt's
+    # rank-1 vote (9/2=4.5), wasting attempt_2 on "output = input".
+    g = grid_factory(2, 2, seed=1)
+    a, b = grid_factory(2, 2, seed=2), grid_factory(2, 2, seed=3)
+    task = task_factory([(g, g)], [g])
+    llm = _RankedStubSolver([a, b], name="llm_ttt")
+    identity_echo = _StubSolver(g, name="identity")
+    attempts = solve_task(task, [llm, identity_echo], budget_s=5.0)
+    assert attempts[0].attempt_1 == a
+    assert attempts[0].attempt_2 == b  # llm_ttt's 2nd candidate, not the echo
+
+
 # ---- pipeline: failure logging + weight warning ---------------------------
 def test_failing_solver_is_logged_and_skipped(grid_factory, task_factory, caplog):
     g = grid_factory(2, 2, seed=1)
@@ -193,6 +215,41 @@ def test_entrypoint_canary_max_tasks_keeps_submission_complete(tmp_path, monkeyp
     assert loaded["untouched"][0]["attempt_1"] == [[0]]  # fallback retained
     assert result["problems"] == []  # validates against the FULL task set
     assert result["num_tasks"] == 1  # only the canary subset was solved
+
+
+def _three_task_challenges():
+    t = {
+        "train": [{"input": [[1, 2]], "output": [[2, 1]]}],
+        "test": [{"input": [[3, 4]]}],
+    }
+    return {"a": t, "b": t, "c": t}
+
+
+def test_commit_fast_path_canaries_on_placeholder_hash(tmp_path, monkeypatch):
+    sub = _env(monkeypatch, tmp_path, _three_task_challenges())
+    mod = _load_entrypoint()
+    # Make the written file's hash "the placeholder" and shrink the canary size.
+    data_file = tmp_path / "data" / "arc-agi_test_challenges.json"
+    monkeypatch.setattr(mod, "PLACEHOLDER_SHA256", mod._sha256_file(data_file))
+    monkeypatch.setattr(mod, "_COMMIT_CANARY_TASKS", 1)
+    result = mod.main()
+    assert result["num_tasks"] == 1  # canary subset
+    assert json.loads(sub.read_text()).keys() == {"a", "b", "c"}  # still complete
+
+
+def test_commit_fast_path_full_run_on_hash_mismatch(tmp_path, monkeypatch):
+    _env(monkeypatch, tmp_path, _three_task_challenges())
+    mod = _load_entrypoint()  # real PLACEHOLDER_SHA256 won't match the temp file
+    assert mod.main()["num_tasks"] == 3  # full run (fail-safe direction)
+
+
+def test_commit_fast_path_force_full_override(tmp_path, monkeypatch):
+    _env(monkeypatch, tmp_path, _three_task_challenges())
+    mod = _load_entrypoint()
+    data_file = tmp_path / "data" / "arc-agi_test_challenges.json"
+    monkeypatch.setattr(mod, "PLACEHOLDER_SHA256", mod._sha256_file(data_file))
+    monkeypatch.setenv("ARC_FORCE_FULL", "1")
+    assert mod.main()["num_tasks"] == 3  # override wins over the hash match
 
 
 def test_entrypoint_errors_clearly_when_data_missing(tmp_path, monkeypatch):

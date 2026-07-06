@@ -46,11 +46,15 @@ class LLMSolver(Solver):
         self.max_candidates = max_candidates
         self.aug_seed = aug_seed
         self.use_likelihood = use_likelihood
+        self.last_telemetry: dict = {}
 
     def solve(self, task: Task, budget_s: float) -> Candidates:
         deadline = time.monotonic() + budget_s
         augs = distinct_augs(self.num_augs, seed=self.aug_seed, keep_zero=self.keep_zero)
         per_test: Candidates = []
+        augs_completed = 0
+        decode_s = 0.0
+        score_s = 0.0
 
         for i in range(len(task.test)):
             weighted: list[tuple] = []
@@ -60,6 +64,7 @@ class LLMSolver(Solver):
                 if j > 0 and time.monotonic() > deadline:
                     break
                 atask = aug.apply_task(task)
+                t_dec = time.monotonic()
                 grids = generate_candidates(
                     self.model,
                     atask.train,
@@ -71,6 +76,8 @@ class LLMSolver(Solver):
                     # budget so one slow generation can't overrun it.
                     max_time_s=max(0.0, deadline - time.monotonic()),
                 )
+                decode_s += time.monotonic() - t_dec
+                augs_completed += 1
                 for grid in grids:
                     weighted.append((aug.invert_grid(grid), 1.0))
 
@@ -79,10 +86,20 @@ class LLMSolver(Solver):
             if self.use_likelihood and voted:
                 # Re-rank the voted candidates by the model's own confidence
                 # under the canonical (un-augmented) prompt.
+                t_sc = time.monotonic()
                 scored = score_candidates(
                     self.model, task.train, task.test[i].input, voted
                 )
+                score_s += time.monotonic() - t_sc
                 voted = [g for g, _ in scored]
             per_test.append(voted[: self.max_candidates])
 
+        # Budget-split instrument: read this to see whether decode is being
+        # starved (augs_completed << num_tests * num_augs) before tuning knobs.
+        self.last_telemetry = {
+            "augs_completed": augs_completed,
+            "augs_planned": len(augs) * len(task.test),
+            "decode_s": round(decode_s, 2),
+            "score_s": round(score_s, 2),
+        }
         return per_test
