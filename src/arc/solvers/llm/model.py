@@ -165,6 +165,15 @@ class HFModel:
             from peft import PeftModel  # noqa: PLC0415
 
             self.model = PeftModel.from_pretrained(self.model, adapter_path)
+            # Merge the base-fine-tune adapter into the base weights rather than
+            # leaving it wrapped: `LoraTTTRunner.adapt` calls `get_peft_model` on
+            # `self.model` per task, and stacking a second PEFT wrapper on top of
+            # a still-wrapped PeftModel is fragile (double-wrap — target module
+            # names/paths shift, and unwrapping on `reset()` gets ambiguous).
+            # Merged weights behave like a plain model at inference (same cost,
+            # no extra LoRA matmuls), so this makes ADAPTER_DS + TTT compose
+            # safely by construction instead of by convention.
+            self.model = self.model.merge_and_unload()
         self.model.eval()
         # Input tensors go to the embedding layer's device (cuda:0 under
         # device_map="auto"); accelerate hooks route activations across shards.
