@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from multiprocessing import get_context
 from pathlib import Path
@@ -76,6 +78,38 @@ def _shard(task_ids: list[str], num_workers: int) -> list[list[str]]:
 
 def _worker_jsonl_path(work_dir: Path, worker_index: int) -> Path:
     return work_dir / f"worker_{worker_index}.jsonl"
+
+
+def _localize_model(model_path: str, cache_root: str | Path | None = None) -> str:
+    """Copy the model directory to fast local disk ONCE, for all workers.
+
+    Kaggle mounts /kaggle/input over network storage (GCS FUSE): N workers
+    concurrently streaming the same ~15GB checkpoint share one pipe and can
+    spend 30-60+ min just loading (observed on the first L4x4 run). One
+    sequential copy to local scratch, then N local reads, removes the
+    contention. Any failure (disk quota, exotic layout) falls back to the
+    original path — slower but always correct.
+    """
+    src = Path(model_path)
+    if not src.is_dir():
+        return model_path
+    root = Path(cache_root) if cache_root is not None else Path(tempfile.gettempdir())
+    dst = root / "arc_model_local" / src.name
+    marker = dst / ".arc_copy_complete"
+    try:
+        if not marker.exists():
+            if dst.exists():
+                shutil.rmtree(dst)  # half-finished copy from a crashed attempt
+            _log.info("localizing model %s -> %s", src, dst)
+            t0 = time.monotonic()
+            shutil.copytree(src, dst)
+            marker.touch()
+            _log.info("model localized in %.1fs", time.monotonic() - t0)
+        return str(dst)
+    except Exception as exc:  # noqa: BLE001 — never let the cache sink the run
+        _log.warning("model localization failed (%s); using original path", exc)
+        shutil.rmtree(dst, ignore_errors=True)
+        return model_path
 
 
 def _default_model_factory(worker_index: int, worker_config: dict):
@@ -239,6 +273,14 @@ def run_parallel(
     # work_dir must not leak into this run's merge.
     for i in range(num_workers):
         _worker_jsonl_path(work_root, i).unlink(missing_ok=True)
+
+    # One sequential model copy to local disk beats N workers contending for
+    # the network mount (see _localize_model). Parent-side so it happens once.
+    if model_factory is None and worker_config.get("model_path"):
+        worker_config = {
+            **worker_config,
+            "model_path": _localize_model(worker_config["model_path"]),
+        }
 
     shards = _shard(list(tasks.keys()), num_workers)
     ctx = get_context("spawn")

@@ -290,3 +290,59 @@ def test_entrypoint_has_num_workers_cli_flag():
     sig = inspect.signature(mod.main)
     assert "num_workers" in sig.parameters
     assert sig.parameters["num_workers"].default == 0
+
+
+# ---- model localization (network mount -> local disk, once, parent-side) ----
+def test_localize_model_copies_once(tmp_path):
+    from arc.parallel import _localize_model
+
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "weights.safetensors").write_bytes(b"w" * 64)
+    (src / "config.json").write_text("{}")
+    cache = tmp_path / "cache"
+
+    local1 = _localize_model(str(src), cache_root=cache)
+    assert local1 != str(src)
+    assert (Path(local1) / "weights.safetensors").read_bytes() == b"w" * 64
+    assert (Path(local1) / ".arc_copy_complete").exists()
+
+    # Second call reuses the completed copy (marker present -> no re-copy).
+    before = (Path(local1) / "weights.safetensors").stat().st_mtime_ns
+    local2 = _localize_model(str(src), cache_root=cache)
+    assert local2 == local1
+    assert (Path(local2) / "weights.safetensors").stat().st_mtime_ns == before
+
+
+def test_localize_model_recovers_from_half_copy(tmp_path):
+    from arc.parallel import _localize_model
+
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "weights.safetensors").write_bytes(b"good")
+    cache = tmp_path / "cache"
+    # Simulate a crashed prior copy: dst exists but no completion marker.
+    stale = cache / "arc_model_local" / "model"
+    stale.mkdir(parents=True)
+    (stale / "weights.safetensors").write_bytes(b"trunc")
+
+    local = _localize_model(str(src), cache_root=cache)
+    assert (Path(local) / "weights.safetensors").read_bytes() == b"good"
+
+
+def test_localize_model_falls_back_on_failure(tmp_path):
+    from arc.parallel import _localize_model
+
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "w").write_bytes(b"x")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory must go")
+    # cache_root is a FILE -> mkdir/copytree fails -> original path returned.
+    assert _localize_model(str(src), cache_root=blocker) == str(src)
+
+
+def test_localize_model_passthrough_for_non_dir(tmp_path):
+    from arc.parallel import _localize_model
+
+    assert _localize_model("Qwen/some-hub-id", cache_root=tmp_path) == "Qwen/some-hub-id"
