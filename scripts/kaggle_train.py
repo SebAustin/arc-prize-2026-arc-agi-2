@@ -24,10 +24,34 @@ Usage (inside the Kaggle notebook, after the bootstrap cell):
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 
 _DEFAULT_LOCAL_OUTPUT = "artifacts/adapter"
 _DEFAULT_KAGGLE_OUTPUT = "/kaggle/working/adapter"
+
+
+def _locate_corpus(corpus_path: str) -> str:
+    """Resolve the corpus file even when the Dataset mounts under an
+    unexpected folder name (dataset slugs and kernel attachments don't always
+    line up — the exact failure that cost the first training canary). If the
+    given path is missing, search /kaggle/input for the same basename; on
+    failure, raise with a listing of what IS mounted so the fix is obvious."""
+    if os.path.exists(corpus_path):
+        return corpus_path
+    basename = os.path.basename(corpus_path)
+    matches = sorted(glob.glob(f"/kaggle/input/**/{basename}", recursive=True))
+    if matches:
+        print(f"corpus not at {corpus_path}; found {matches[0]}")
+        return matches[0]
+    inp = "/kaggle/input"
+    mounted = sorted(os.listdir(inp)) if os.path.isdir(inp) else []
+    listing = "\n".join(f"    - {inp}/{m}" for m in mounted) or "    (nothing mounted)"
+    raise FileNotFoundError(
+        f"Corpus not found: {corpus_path} (and no {basename} anywhere under "
+        f"/kaggle/input).\nAttach the corpus Dataset to this notebook "
+        f"(Add Input -> Datasets -> arc-synth-corpus).\nCurrently mounted:\n{listing}"
+    )
 
 
 def _default_output_dir() -> str:
@@ -85,6 +109,7 @@ def main(
             "corpus_path is required (pass explicitly or set ARC_CORPUS_PATH)"
         )
 
+    corpus_path = _locate_corpus(corpus_path)
     print(f"base_model_path={base_model_path}")
     print(f"corpus_path={corpus_path}")
     print(f"output_dir={output_dir}  max_examples={max_examples}  epochs={epochs}  resume={resume}")

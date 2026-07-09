@@ -103,3 +103,19 @@ def test_main_resolves_paths_from_env(monkeypatch, tmp_path):
         assert "torch" in str(exc)
     else:
         raise AssertionError("expected ModuleNotFoundError from finetune()'s torch import")
+
+
+def test_locate_corpus_passthrough_when_exists(tmp_path):
+    mod = _load_kaggle_train()
+    p = tmp_path / "synth.jsonl"
+    p.write_text("{}")
+    assert mod._locate_corpus(str(p)) == str(p)
+
+
+def test_locate_corpus_raises_with_listing_when_missing(tmp_path):
+    mod = _load_kaggle_train()
+    import pytest
+
+    with pytest.raises(FileNotFoundError) as ei:
+        mod._locate_corpus(str(tmp_path / "nope" / "synth_50k.jsonl"))
+    assert "Attach the corpus Dataset" in str(ei.value)
