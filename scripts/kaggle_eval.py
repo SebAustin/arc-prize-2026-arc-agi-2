@@ -87,6 +87,22 @@ def main(
             f"({time.monotonic() - t_task:.1f}s, running {solved}/{n})"
         )
 
+    # Release this run's model before returning: paired A/B evals call main()
+    # twice in one kernel, and a resident 15GB model from arm 1 starves arm 2's
+    # GPU headroom (observed: arm 2 OOM'd at TTT step 1 on every large task,
+    # invalidating the comparison). Explicit free + cache flush prevents it.
+    if model_path:
+        del solvers, model
+        import gc  # noqa: PLC0415
+
+        gc.collect()
+        try:
+            import torch  # noqa: PLC0415
+
+            torch.cuda.empty_cache()
+        except Exception:  # pragma: no cover — CPU environments
+            pass
+
     elapsed = time.monotonic() - t0
     summary = score_predictions(predictions, solutions)
     summary.update(
