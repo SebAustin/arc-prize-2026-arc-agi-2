@@ -190,7 +190,12 @@ def finetune(
     model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
         torch_dtype=getattr(torch, dtype),
-        device_map=device,
+        # "auto" shards across all visible GPUs: a 7B in fp16 (~13.2GB) fills a
+        # single 14.5GB T4 to the brim and OOMs the moment LoRA params are added
+        # (observed on the first training canary). On one big GPU this behaves
+        # exactly like before; batch tensors still go to `device` (= cuda:0, the
+        # embedding shard) and accelerate hooks route activations across cards.
+        device_map="auto",
         use_safetensors=True,  # refuse pickle .bin checkpoints (RCE surface)
     )
 
