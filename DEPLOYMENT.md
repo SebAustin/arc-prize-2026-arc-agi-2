@@ -83,6 +83,13 @@ conflict) would each have been caught by a 20-minute canary.
   notebook UI (Settings → Accelerator), after which it persists for future versions.
 - A pulled `kernel-metadata.json` may contain `"machine_shape": "None"` (a literal
   string) — **delete that key before pushing** or it can override `enable_gpu: true`.
+- Worse: the API **reports** values it does not **accept** — a kernel with L4×4 set in
+  the UI pulls as `"machine_shape": "NvidiaL4"`, but pushing that value back is treated
+  as invalid and **resets the session to the default P100** (whose sm_60 Kaggle's torch
+  cannot run: "no kernel image is available"). Rule: **always strip `machine_shape`
+  (and `docker_image`) from pulled metadata before every push** — an omitted value
+  preserves the kernel's stored UI accelerator; any explicit value risks a silent reset.
+  The only API-pushable GPU value that works reliably is `--accelerator NvidiaTeslaT4`.
 - The model is hardware-adaptive either way: bf16 on L4/A100, fp16 on T4/P100, and
   `device_map="auto"` shards a 7B across multiple cards (2×T4 works).
 
