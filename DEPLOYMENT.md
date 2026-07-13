@@ -261,16 +261,21 @@ This is the **only** step this runbook prepares but never executes.
 3. Competition page → **Submit Predictions** → select the committed notebook version's
    `submission.json` output → **Submit to Competition**.
 
-```
-# This is the exact gated action — a manual UI click, not a CLI command, because
-# Kaggle competition submission has no offline/dry-run CLI equivalent that spends
-# the daily quota safely. Do this yourself when ready:
-#
-#   Kaggle UI -> Competition -> Submit Predictions -> pick the committed version -> Submit
+Submit manually via the UI, **or** programmatically:
+
+```bash
+# The CLI CAN submit a committed kernel version to a code competition:
+kaggle competitions submit -c arc-prize-2026-arc-agi-2 \
+    -k <owner>/<kernel> -v <version> -m "<message>"
 ```
 
-**Do not** run this from an agent, script, or automation. It consumes the **1
-submission/day** quota and is irreversible for that slot.
+**Two modes, by choice:**
+- **Manual (default):** you click Submit — full human control of the 1/day slot.
+- **Autopilot (opt-in, §8):** `scripts/daily_autopilot.py` submits **automatically**,
+  but ONLY a config whose 40-task public-eval canary strictly beats the current best
+  (≥ +1 task), at most once/day. Enabled by the user's standing authorization. Safe
+  because Kaggle scores your **best** selected submission (§ rollback below) — an
+  occasional weak auto-submit cannot lower your final standing.
 
 **Rollback note:** a bad submission is not destructive — Kaggle lets you pick which of
 your submitted versions is your **final scored entry** at competition close. If a
@@ -371,6 +376,45 @@ version of torchao` (run finishes in seconds, DSL-only score)**
   than waiting for an actual 12h timeout.
 
 ---
+
+## 9. Daily autopilot (self-driving enhance → run → measure → submit)
+
+`scripts/daily_autopilot.py` is a **stateful, idempotent tick**: a scheduler fires it a
+few times/day and each tick advances one step of an async pipeline that can span days
+(Kaggle GPU kernels take hours). It never blocks; it polls, advances, and exits.
+
+**What one tick does** (at most ONE Kaggle GPU kernel in flight at a time):
+1. Reconcile any submitted run whose public-LB score has now landed (promote if it beat
+   the best, else reject — Kaggle keeps your best, so no harm).
+2. Poll the in-flight kernel; on COMPLETE, dispatch by kind:
+   *train* → stage the produced adapter as a Dataset; *eval* → parse the 40-task
+   public-eval `correct`, **gate: promote only if `correct ≥ best + 1`**; *submit_commit*
+   → call `kaggle competitions submit -k … -v …`.
+3. If nothing is pending and the weekly GPU budget (≈25 h) allows, launch the next
+   **enhancement backlog** item (adapter train → PoE re-gate → TTT sweep → larger
+   adapter → …; see `scripts/autopilot_kernels.py`).
+4. Append a dated line to `SUBMISSION_LOG.md`.
+
+**Safety invariants (enforced + unit-tested):** ≤ 1 submission/day; auto-submit ONLY a
+config that strictly beat the current best on the public-eval canary; a "Maximum batch
+GPU session" push is treated as *busy → retry next tick* (never a crash); pushes never
+carry `machine_shape`/`docker_image` (landmine, §7). State in
+`artifacts/autopilot_state.json` (gitignored); audit trail in `SUBMISSION_LOG.md`.
+
+**Run / schedule it:**
+```bash
+scripts/install_autopilot.sh run-once     # fire one tick now (safe; polls + logs)
+scripts/daily_autopilot.py --dry-run      # a tick that never touches the CLI
+scripts/install_autopilot.sh install      # macOS launchd agent: fires 08:00 & 20:00
+scripts/install_autopilot.sh status       # agent + state + last log lines
+scripts/install_autopilot.sh uninstall
+```
+**Caveats:** local-only (Kaggle creds live in `~/.kaggle/` on this Mac — a cloud
+scheduler can't authenticate), so the Mac must be awake for a tick to fire; missed ticks
+are harmless (the state machine resumes next fire). Training uses **T4×2** only (API
+can't request L4 — landmine §7); a one-time UI L4×4 flip on the train kernel is a 5×
+speedup, never a blocker. Honest ceiling: this **narrows the gap to the leader**; it does
+not overtake a 55.
 
 ## Summary of what this runbook governs
 
