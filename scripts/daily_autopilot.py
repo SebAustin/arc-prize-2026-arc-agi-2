@@ -542,6 +542,19 @@ def _finish_submit_commit(
     return new_state, f"SUBMITTED: {ref} ({message!r})"
 
 
+# A waiting kernel unresolved for this many calendar days is treated as dead
+# (any real T4 run completes in < 12 h) and abandoned so the loop never wedges.
+STALE_INFLIGHT_DAYS = 2
+
+
+def _days_between(start_iso: str, end_iso: str) -> int:
+    """Whole days from `start_iso` to `end_iso` (both ISO dates); 0 on parse error."""
+    try:
+        return (date.fromisoformat(end_iso) - date.fromisoformat(start_iso)).days
+    except (ValueError, TypeError):
+        return 0
+
+
 def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[dict, str]:
     inflight = state["inflight"]
     status = client.kernel_status(inflight["kernel"]).upper()
@@ -557,7 +570,17 @@ def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[d
     if status in ("ERROR", "CANCEL"):
         # Simple per-purpose failure: log and clear, no automatic retry loop.
         return {**state, "inflight": None}, f"FAILED: {label} status={status}"
-    return state, f"waiting: {label} status={status}"
+    # Waiting (RUNNING/QUEUED/UNKNOWN). Guard the UNATTENDED case: a phantom
+    # kernel that never resolves (e.g. Kaggle's session-status endpoint stuck on
+    # 404, or a run that silently died) must not wedge the autopilot forever.
+    # Stamp the first-observed date, then abandon after STALE_INFLIGHT_DAYS
+    # (any real T4 run finishes < 12 h, so >=2 calendar days means it's dead).
+    since = inflight.get("since", today)
+    if _days_between(since, today) >= STALE_INFLIGHT_DAYS:
+        return {**state, "inflight": None}, (
+            f"STALE (>={STALE_INFLIGHT_DAYS}d unresolved) {label} status={status}; abandoning"
+        )
+    return {**state, "inflight": {**inflight, "since": since}}, f"waiting: {label} status={status}"
 
 
 def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]:

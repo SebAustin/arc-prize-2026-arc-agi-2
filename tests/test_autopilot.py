@@ -692,3 +692,35 @@ def test_backlog_round_robins_and_wraps(autopilot):
 
     expected_names = [f"backlog:{item['name']}" for item in ak.BACKLOG]
     assert kernels_seen == expected_names * 2
+
+
+# ---------------------------------------------------------------------------
+# staleness guard: an unresolved inflight is abandoned after STALE_INFLIGHT_DAYS
+# (protects the UNATTENDED loop from a phantom kernel — e.g. a 404 session)
+# ---------------------------------------------------------------------------
+
+
+def test_waiting_inflight_gets_since_stamp(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.TRAIN_KERNEL, "version": 8, "kind": "train",
+        "purpose": "x", "config": dict(state["live_config"]),
+    }
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]})
+    new_state = mod.tick(client, state, "2026-07-12")
+    assert new_state["inflight"] is not None          # still waiting
+    assert new_state["inflight"]["since"] == "2026-07-12"  # first-observed stamped
+
+
+def test_stale_inflight_is_abandoned(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.TRAIN_KERNEL, "version": 8, "kind": "train",
+        "purpose": "x", "config": dict(state["live_config"]),
+        "since": "2026-07-10",  # 2 days before `today` -> stale
+    }
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]})
+    new_state = mod.tick(client, state, "2026-07-12")
+    assert new_state["inflight"] is None  # abandoned, loop unwedged
