@@ -18,3 +18,8 @@ architecture realistically reaches single digits → low-teens — the autopilot
 
 409 Client Error: Conflict for url: https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel |
 | 2026-07-14 | - | - | - | operator: fixed Kaggle-API 409 (titles now slug-resolve to kernel ids), 404-status misparse, push-failure retry (3 strikes); added exploration-submission lane (untried variants use idle daily slots — Kaggle ranks best); rewound backlog_index 1 → 0 |
+| 2026-07-14 | - | - | - | backlog[adapter_hard_2500] push BUSY (2 GPU slots in use); retrying next tick; explore[poe] push BUSY; retrying next tick |
+| 2026-07-14 | - | - | - | backlog[adapter_hard_2500] push FAILED (1/3); retrying next tick: Kernel push error: Notebook not found; explore[poe] push FAILED: Kernel push error: Notebook not found |
+| 2026-07-14 | - | - | - | launched backlog[adapter_hard_2500] (train) v1; explore[poe] push BUSY; retrying next tick |
+| 2026-07-14 | - | - | - | waiting: train kernel sebmontreal/arc-agi-2-autopilot-train v1 status=RUNNING; explore[poe] push FAILED: Kernel push error: Notebook not found |
+| 2026-07-14 | - | - | - | waiting: train kernel sebmontreal/arc-agi-2-autopilot-train v1 status=RUNNING; submission kernel id burned (create rejected — Kaggle busy-create bug); rotated to sebmontreal/arc-agi-2-autopilot-submit-2; retrying next tick |
