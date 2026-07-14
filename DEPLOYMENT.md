@@ -272,7 +272,7 @@ kaggle competitions submit -c arc-prize-2026-arc-agi-2 \
 **Two modes, by choice:**
 - **Manual (default):** you click Submit — full human control of the 1/day slot.
 - **Autopilot (opt-in, §8):** `scripts/daily_autopilot.py` submits **automatically**,
-  but ONLY a config whose 40-task public-eval canary strictly beats the current best
+  but ONLY a config whose full 120-task public-eval canary strictly beats the current best
   (≥ +1 task), at most once/day. Enabled by the user's standing authorization. Safe
   because Kaggle scores your **best** selected submission (§ rollback below) — an
   occasional weak auto-submit cannot lower your final standing.
@@ -387,7 +387,7 @@ few times/day and each tick advances one step of an async pipeline that can span
 1. Reconcile any submitted run whose public-LB score has now landed (promote if it beat
    the best, else reject — Kaggle keeps your best, so no harm).
 2. Poll the in-flight kernel; on COMPLETE, dispatch by kind:
-   *train* → stage the produced adapter as a Dataset; *eval* → parse the 40-task
+   *train* → stage the produced adapter as a Dataset; *eval* → parse the full 120-task
    public-eval `correct`, **gate: promote only if `correct ≥ best + 1`**; *submit_commit*
    → call `kaggle competitions submit -k … -v …`.
 3. If nothing is pending and the weekly GPU budget (≈25 h) allows, launch the next

@@ -25,6 +25,7 @@ from autopilot_config import (
     BASE_MODEL_MOUNT,
     BASE_MODEL_SOURCE,
     COMPETITION_SLUG,
+    FULL_EVAL_LIMIT,
     HARD_CORPUS_DATASET,
     HARD_CORPUS_FILE,
     KERNEL_RUNS_DIR,
@@ -182,7 +183,9 @@ def eval_run_src(config: dict) -> str:
         "llm_kwargs": config.get("llm_kwargs"),
         # T4-safe TTT memory settings as the base; the run's own ttt_config wins.
         "ttt_config": {**T4_SAFE_TTT, **(config.get("ttt_config") or {})},
-        "limit": config.get("eval_limit", 40),
+        # Full 120-task public eval by default (None = all) so the promotion gate
+        # can actually detect a sub-1% gain; a config may still override eval_limit.
+        "limit": config.get("eval_limit", FULL_EVAL_LIMIT),
     }
     return (
         "import logging\n"
@@ -302,14 +305,16 @@ BACKLOG: list[dict] = [
         "kind": "eval",
         "build": _build_poe_regate,
         "config": _config_poe_regate,
-        "estimated_hours": 1.0,
+        # Full 120-task public eval on T4 ~5 h (was 1 h for the old 40-task slice).
+        "estimated_hours": 5.0,
     },
     {
         "name": "ttt_steps_sweep",
         "kind": "eval",
         "build": _build_ttt_steps_sweep,
         "config": _config_ttt_steps_sweep,
-        "estimated_hours": 1.5,
+        # Full 120-task eval with 96 TTT adapt steps/task ~6 h.
+        "estimated_hours": 6.0,
     },
     {
         "name": "adapter_hard_6000",

@@ -7,6 +7,7 @@ GPU hours but ZERO competition submissions.
 
 Usage (Kaggle notebook, after the bootstrap cell):
     from kaggle_eval import main
+    main(model_path=MODEL_DS, limit=None)          # FULL public eval split (all tasks)
     main(model_path=MODEL_DS, limit=40)            # fixed first-40 canary slice
     main(model_path=MODEL_DS, limit=80, offset=40) # confirmation slice
 """
@@ -44,7 +45,7 @@ def main(
     llm_kwargs: dict | None = None,
     use_ttt: bool = True,
     ttt_config: dict | None = None,
-    limit: int = 40,
+    limit: int | None = 40,
     offset: int = 0,
     split: str = "evaluation",
 ) -> dict:
@@ -56,7 +57,11 @@ def main(
     tasks, solutions = load_split(split, cfg=cfg)
     if solutions is None:
         raise ValueError(f"split {split!r} has no solutions; cannot score")
-    items = itertools.islice(tasks.items(), offset, offset + limit)
+    # limit=None -> full split (islice treats a None stop as "to the end"); an
+    # int caps the slice at offset+limit. The autopilot passes None to score the
+    # whole 120-task public eval — sub-1% gains are invisible on a 40-task slice.
+    stop = None if limit is None else offset + limit
+    items = itertools.islice(tasks.items(), offset, stop)
     tasks = dict(items)
     solutions = {k: v for k, v in solutions.items() if k in tasks}
     print(f"scoring {len(tasks)} tasks")

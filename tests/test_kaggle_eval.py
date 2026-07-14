@@ -67,3 +67,12 @@ def test_eval_offset_and_limit_slice(tmp_path, monkeypatch):
     _eval_env(monkeypatch, tmp_path)
     summary = _load_eval().main(per_task_budget_s=5.0, limit=1, offset=1)
     assert summary["num_tasks"] == 1  # second task only
+
+
+def test_eval_limit_none_scores_full_split(tmp_path, monkeypatch):
+    # The widened-canary contract: limit=None means "score every task in the
+    # split" (islice treats a None stop as to-the-end), not a capped slice.
+    _eval_env(monkeypatch, tmp_path)
+    summary = _load_eval().main(per_task_budget_s=5.0, limit=None)
+    assert summary["num_tasks"] == 2  # both tasks, no cap
+    assert summary["limit"] is None

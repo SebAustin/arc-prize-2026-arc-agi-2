@@ -35,6 +35,15 @@ ADAPTER_MOUNT = f"/kaggle/input/datasets/{ADAPTER_DATASET_SLUG}"
 
 WEEKLY_GPU_HOUR_QUOTA = 25.0
 
+# Public-eval canary size for every autopilot eval (candidate gate + backlog evals).
+# The model solves <1% of tasks, so a 40-task slice reads 0/40 even for a working
+# pipeline and the promotion gate (correct >= best_eval_correct + 1) can almost never
+# fire. Scoring the FULL public evaluation split (120 tasks) ~triples the chance of
+# registering a solved task — the sensitivity the gate needs to ever auto-promote —
+# at ~3x the GPU cost (~5 h on T4). None = all tasks in the split (kaggle_eval treats
+# a None `limit` as "to the end", so this stays correct if the split ever grows).
+FULL_EVAL_LIMIT: int | None = None
+
 # The autopilot can only get T4x2 via the API (L4x4 is UI-only — landmine). A 7B
 # in fp16 fills ~13 of a T4's 14.5 GB, leaving almost nothing for per-task TTT's
 # LoRA activations — the default TTT config OOMs every task and the whole eval

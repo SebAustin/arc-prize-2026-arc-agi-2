@@ -689,9 +689,35 @@ def test_backlog_round_robins_and_wraps(autopilot):
         state = mod.tick(client, state, "2026-07-12")
         kernels_seen.append(state["inflight"]["purpose"])
         state["inflight"] = None  # simulate the run finishing/clearing without full dispatch
+        state["gpu_hours_week"] = 0.0  # isolate cursor-wrapping from quota (tested separately)
 
     expected_names = [f"backlog:{item['name']}" for item in ak.BACKLOG]
     assert kernels_seen == expected_names * 2
+
+
+def test_adapter_train_is_first_backlog_item(autopilot):
+    # The "adapter training runs next" invariant: a fresh cursor (backlog_index=0)
+    # must launch the hard-corpus adapter TRAIN, not a cheap eval.
+    ak = sys.modules["autopilot_kernels"]
+    first = ak.BACKLOG[0]
+    assert first["name"] == "adapter_hard_2500"
+    assert first["kind"] == "train"
+
+
+def test_eval_run_src_defaults_to_full_public_split(autopilot):
+    # Widened canary: with no eval_limit in the config, the generated run cell
+    # must ask kaggle_eval for the FULL split (limit=None), not the old 40-slice.
+    ak = sys.modules["autopilot_kernels"]
+    src = ak.eval_run_src({})
+    assert "'limit': None" in src
+    assert "'limit': 40" not in src
+
+
+def test_eval_run_src_respects_explicit_eval_limit(autopilot):
+    # A config may still pin a cheaper slice (e.g. a smoke run) — the override wins.
+    ak = sys.modules["autopilot_kernels"]
+    src = ak.eval_run_src({"eval_limit": 40})
+    assert "'limit': 40" in src
 
 
 # ---------------------------------------------------------------------------
