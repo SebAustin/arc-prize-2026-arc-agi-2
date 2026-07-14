@@ -14,3 +14,7 @@ architecture realistically reaches single digits → low-teens — the autopilot
 | 2026-07-13 | - | - | - | launched backlog[poe_regate] (eval) v13 |
 | 2026-07-13 | - | - | - | FAILED: eval kernel sebmontreal/arc-agi-2-self-contained-submission-notebook v13 status=ERROR |
 | 2026-07-13 | - | - | - | operator: widened eval canary 40 → full 120-task public split (sub-1% sensitivity); rewound backlog_index 2 → 0 so the fixed adapter_hard_2500 train launches next |
+| 2026-07-14 | - | - | - | backlog[adapter_hard_2500] push FAILED: Your kernel title does not resolve to the specified id. This may result in surprising behavior. We suggest making your title something that resolves to the specified id. See https://en.wikipedia.org/wiki/Clean_URL#Slug for more information on how slugs are determined.
+
+409 Client Error: Conflict for url: https://api.kaggle.com/v1/kernels.KernelsApiService/SaveKernel |
+| 2026-07-14 | - | - | - | operator: fixed Kaggle-API 409 (titles now slug-resolve to kernel ids), 404-status misparse, push-failure retry (3 strikes); added exploration-submission lane (untried variants use idle daily slots — Kaggle ranks best); rewound backlog_index 1 → 0 |

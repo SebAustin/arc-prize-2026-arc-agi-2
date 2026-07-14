@@ -75,7 +75,15 @@ Check the log for `GPU N:` lines (nvidia-smi), `HFModel: loading ... dtype=...`,
 for the full scored run. Two earlier 10-hour-scale failures (accelerator off; torchao
 conflict) would each have been caught by a 20-minute canary.
 
-**Pushing via the API (`kaggle kernels push`) — two landmines (learned the hard way):**
+**Pushing via the API (`kaggle kernels push`) — landmines (learned the hard way):**
+- **The metadata `title` must slug-resolve to the kernel id** (lowercase,
+  non-alphanumerics → hyphens). Enforced server-side since ~2026-07-14 — a mismatch
+  now hard-fails the push with `409 ... kernel title does not resolve to the specified
+  id` (it used to be just a warning). Safest title = the id's slug itself
+  (`autopilot_kernels._slug_title` does this for every autopilot push). The same API
+  change made `kaggle kernels status` return **404 for kernels with no active
+  session** — treat a 404 as UNKNOWN, never as a run failure ("404 Client Error"
+  contains the substring "ERROR"; naive token-scans misread it).
 - `--accelerator` **overrides** `enable_gpu` from the metadata, and the server
   **silently accepts invalid names** — a typo yields a CPU-only run with no error.
   Only `NvidiaTeslaT4` and `NvidiaTeslaP100` are documented/valid GPU names; the
@@ -383,22 +391,35 @@ version of torchao` (run finishes in seconds, DSL-only score)**
 few times/day and each tick advances one step of an async pipeline that can span days
 (Kaggle GPU kernels take hours). It never blocks; it polls, advances, and exits.
 
-**What one tick does** (at most ONE Kaggle GPU kernel in flight at a time):
+**What one tick does** (two lanes — a main slot for train/eval/gated-submit kernels
+plus a narrow **exploration slot** that only ever runs a submit-commit on the
+submission kernel; Kaggle allows 2 concurrent GPU sessions and the lanes never share
+a kernel):
 1. Reconcile any submitted run whose public-LB score has now landed (promote if it beat
    the best, else reject — Kaggle keeps your best, so no harm).
-2. Poll the in-flight kernel; on COMPLETE, dispatch by kind:
+2. Poll the in-flight kernels; on COMPLETE, dispatch by kind:
    *train* → stage the produced adapter as a Dataset; *eval* → parse the full 120-task
-   public-eval `correct`, **gate: promote only if `correct ≥ best + 1`**; *submit_commit*
-   → call `kaggle competitions submit -k … -v …`.
+   public-eval `correct`, **gate: promote only if `correct ≥ best + 1`** (a gate-failed
+   adapter candidate is queued as an exploration variant instead of thrown away);
+   *submit_commit / explore commit* → `kaggle competitions submit -k … -v …`.
 3. If nothing is pending and the weekly GPU budget (≈25 h) allows, launch the next
    **enhancement backlog** item (adapter train → PoE re-gate → TTT sweep → larger
    adapter → …; see `scripts/autopilot_kernels.py`).
-4. Append a dated line to `SUBMISSION_LOG.md`.
+4. **Exploration submissions:** if today's submission slot is still unused and an
+   UNTRIED config variant exists (PoE, TTT-96, gate-failed adapters), commit + submit
+   it. Rationale: Kaggle ranks the account's **best** submission, so an ungated
+   submission can never lower the standing — and at <1% ability the eval gate almost
+   never fires, which left the free daily slot unused for 6 straight days (07-08→07-14).
+   Each variant is submitted at most once.
+5. Append a dated line to `SUBMISSION_LOG.md`.
 
-**Safety invariants (enforced + unit-tested):** ≤ 1 submission/day; auto-submit ONLY a
-config that strictly beat the current best on the public-eval canary; a "Maximum batch
-GPU session" push is treated as *busy → retry next tick* (never a crash); pushes never
-carry `machine_shape`/`docker_image` (landmine, §7). State in
+**Safety invariants (enforced + unit-tested):** ≤ 1 submission/day across BOTH lanes;
+the gated path always outranks exploration; the submission kernel is held by at most
+one lane at a time; a "Maximum batch GPU session" push is treated as *busy → retry next
+tick* (never a crash); a failed push retries the same backlog item up to 3× before
+skipping (a transient 409 must not knock the adapter train out of line); kernel titles
+are derived from the kernel id (409 landmine, §3); a 404 status is UNKNOWN, not ERROR;
+pushes never carry `machine_shape`/`docker_image` (landmine, §7). State in
 `artifacts/autopilot_state.json` (gitignored); audit trail in `SUBMISSION_LOG.md`.
 
 **Run / schedule it:**

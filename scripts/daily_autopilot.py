@@ -74,6 +74,7 @@ from autopilot_config import (
     ADAPTER_MOUNT,
     BASE_MODEL_MOUNT,
     COMPETITION_SLUG,
+    EXPLORE_COMMIT_HOURS,
     GPU_ACCELERATOR,
     KERNEL_RUNS_DIR,
     STATE_PATH,
@@ -86,6 +87,7 @@ from autopilot_kernels import (
     BACKLOG,
     dataset_sources_for,
     eval_run_src,
+    exploration_variants,
     stage_dir,
     submission_run_src,
     write_dataset_metadata,
@@ -165,6 +167,14 @@ class KaggleClient:
         """One of COMPLETE/ERROR/CANCEL/RUNNING/QUEUED/UNKNOWN."""
         proc = self._run(["kernels", "status", kernel])
         text = f"{proc.stdout}\n{proc.stderr}".upper()
+        # A 404 is a PHANTOM (no session found: transient right after a push,
+        # and — since Kaggle's ~2026-07-14 API change — for kernels with no
+        # active session), NOT a run failure. It must be detected BEFORE the
+        # token scan: "404 CLIENT ERROR" contains the substring "ERROR", and
+        # misreading it once abandoned healthy runs on the spot. UNKNOWN flows
+        # into the >=STALE_INFLIGHT_DAYS guard instead.
+        if "404" in text or "NOT FOUND" in text:
+            return "UNKNOWN"
         for token in ("COMPLETE", "ERROR", "CANCEL", "RUNNING", "QUEUED"):
             if token in text:
                 return token
@@ -299,6 +309,10 @@ def default_state() -> dict:
         "gpu_hours_week": 0.0,
         "week_start": "",
         "backlog_index": 0,
+        "push_failures": 0,
+        "explore_inflight": None,
+        "explored": [],
+        "extra_exploration_variants": [],
     }
 
 
@@ -514,7 +528,25 @@ def _finish_eval(client: KaggleClient, state: dict, inflight: dict) -> tuple[dic
         }
         msg = f"eval COMPLETE: correct={correct} >= best({best})+1 -> gated for submit"
         return {**base_state, "gated_candidate": gated}, msg
-    return base_state, f"eval COMPLETE: no improvement ({correct} vs best {best}); discarded"
+    msg = f"eval COMPLETE: no improvement ({correct} vs best {best}); discarded"
+    # A gate-failed TRAINED-ADAPTER candidate still gets its lottery ticket:
+    # at <1% ability the canary can't see sub-1/120 gains, and Kaggle ranks the
+    # BEST submission, so queueing it for an exploration submission is free
+    # upside. Only adapter candidates qualify — config tweaks are already in
+    # the static exploration rotation.
+    cand_config = (candidate or {}).get("config")
+    has_adapter = bool(
+        cand_config
+        and (cand_config.get("adapter_dataset") or (candidate or {}).get("adapter_dataset"))
+    )
+    if has_adapter:
+        extra = list(state.get("extra_exploration_variants", []))
+        name = f"adapter-eval-v{inflight['version']}"
+        if all(v.get("name") != name for v in extra):
+            extra.append({"name": name, "config": cand_config})
+            base_state = {**base_state, "extra_exploration_variants": extra}
+            msg += "; queued for exploration submission"
+    return base_state, msg
 
 
 def _finish_submit_commit(
@@ -584,6 +616,12 @@ def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[d
 
 
 def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]:
+    # SUBMISSION_KERNEL must only ever be held by ONE lane: kernel_status polls
+    # per kernel (not per version), so two concurrent sessions on it would
+    # conflate statuses between the lanes. Explore commits are short (~1.5 h);
+    # defer one tick.
+    if state.get("explore_inflight"):
+        return state, "submit_commit deferred: exploration commit holds the submission kernel"
     gated = state["gated_candidate"]
     folder = stage_dir("submit")
     run_src = submission_run_src(gated["config"])
@@ -604,6 +642,9 @@ def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]
 
 
 def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
+    # Same single-holder rule as _launch_submit_commit (see comment there).
+    if state.get("explore_inflight"):
+        return state, "eval deferred: exploration commit holds the submission kernel"
     candidate = state["candidate"]
     folder = stage_dir("eval")
     run_src = eval_run_src(candidate["config"])
@@ -625,6 +666,14 @@ def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
     return {**state, "inflight": inflight}, f"pushed eval v{push.version} for candidate ({label})"
 
 
+# Consecutive push failures on ONE backlog item before it is skipped. Retrying
+# (instead of the old skip-on-first-failure) is what keeps a transient push
+# error from knocking a priority item out of line — the 2026-07-14 409 skipped
+# the adapter train on its very first attempt. Three strikes still bounds a
+# permanently-broken item so the loop can't wedge.
+MAX_PUSH_FAILURES = 3
+
+
 def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]:
     quota = state.get("gpu_hours_week", 0.0)
     if quota >= WEEKLY_GPU_HOUR_QUOTA:
@@ -640,7 +689,15 @@ def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]
         return state, f"backlog[{name}] push BUSY (2 GPU slots in use); retrying next tick"
     if not push.ok:
         name = item["name"]
-        return {**state, "backlog_index": next_idx}, f"backlog[{name}] push FAILED: {push.error}"
+        failures = int(state.get("push_failures", 0)) + 1
+        if failures >= MAX_PUSH_FAILURES:
+            msg = f"backlog[{name}] push FAILED x{failures}; skipping item: {push.error}"
+            return {**state, "backlog_index": next_idx, "push_failures": 0}, msg
+        msg = (
+            f"backlog[{name}] push FAILED ({failures}/{MAX_PUSH_FAILURES}); "
+            f"retrying next tick: {push.error}"
+        )
+        return {**state, "push_failures": failures}, msg
     kernel = TRAIN_KERNEL if item["kind"] == "train" else SUBMISSION_KERNEL
     inflight = {
         "kernel": kernel,
@@ -653,9 +710,107 @@ def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]
         **state,
         "inflight": inflight,
         "backlog_index": next_idx,
+        "push_failures": 0,
         "gpu_hours_week": quota + item.get("estimated_hours", 1.0),
     }
     return new_state, f"launched backlog[{item['name']}] ({item['kind']}) v{push.version}"
+
+
+# ---------------------------------------------------------------------------
+# Exploration slot — a SECOND, narrow inflight lane (only ever a submit-commit
+# on SUBMISSION_KERNEL) so an idle day's submission goes out even while a
+# train/eval occupies the main slot. Kaggle allows 2 concurrent GPU sessions
+# and the two lanes use different kernels; a push that still hits the session
+# cap comes back `busy` and simply retries next tick.
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_explore(client: KaggleClient, state: dict, today: str) -> tuple[dict, str | None]:
+    explore = state.get("explore_inflight")
+    if not explore:
+        return state, None
+    status = client.kernel_status(explore["kernel"]).upper()
+    label = f"explore[{explore['variant']}] kernel {explore['kernel']} v{explore['version']}"
+    if status == "COMPLETE":
+        cleared = {**state, "explore_inflight": None}
+        if state.get("last_submit_date") == today:
+            # The gated path already used today's 1-submission slot; this
+            # variant's ticket is spent (marked tried at launch) — never loop
+            # a submit retry unattended.
+            return cleared, f"{label} COMPLETE but today's submission slot already used"
+        ref = f"{explore['kernel']}:v{explore['version']}:{today}"
+        message = f"autopilot explore[{explore['variant']}] {ref}"
+        if not client.competition_submit(explore["kernel"], explore["version"], message):
+            return cleared, f"explore competition_submit FAILED for v{explore['version']}"
+        new_state = {
+            **cleared,
+            "pending_lb": {"ref": ref, "config": explore["config"], "eval_correct": None},
+            "last_submit_date": today,
+        }
+        return new_state, f"SUBMITTED (exploration): {ref}"
+    if status in ("ERROR", "CANCEL"):
+        return {**state, "explore_inflight": None}, f"FAILED: {label} status={status}"
+    since = explore.get("since", today)
+    if _days_between(since, today) >= STALE_INFLIGHT_DAYS:
+        return {**state, "explore_inflight": None}, (
+            f"STALE (>={STALE_INFLIGHT_DAYS}d unresolved) {label} status={status}; abandoning"
+        )
+    return (
+        {**state, "explore_inflight": {**explore, "since": since}},
+        f"waiting: {label} status={status}",
+    )
+
+
+def _maybe_launch_explore(
+    client: KaggleClient, state: dict, today: str
+) -> tuple[dict, str | None]:
+    """Spend an otherwise-idle day's submission slot on the next UNTRIED
+    exploration variant. Every guard is a reason to silently stand down —
+    exploration must never displace the gated path, double-submit a day,
+    clobber an unresolved pending_lb, or collide with a main-slot kernel."""
+    if state.get("explore_inflight") is not None:
+        return state, None
+    if state.get("last_submit_date") == today:
+        return state, None
+    if state.get("pending_lb") is not None:
+        return state, None  # one pending-LB record at a time (reconcile first)
+    if state.get("gated_candidate") is not None:
+        return state, None  # the gated path owns the next submission
+    if state.get("candidate") is not None:
+        return state, None  # the main lane is about to claim SUBMISSION_KERNEL for eval
+    inflight = state.get("inflight")
+    if inflight and inflight.get("kernel") == SUBMISSION_KERNEL:
+        return state, None  # collision guard: main slot is using this kernel
+    quota = state.get("gpu_hours_week", 0.0)
+    if quota + EXPLORE_COMMIT_HOURS > WEEKLY_GPU_HOUR_QUOTA:
+        return state, None
+    explored = set(state.get("explored", []))
+    variant = next((v for v in exploration_variants(state) if v["name"] not in explored), None)
+    if variant is None:
+        return state, None  # rotation exhausted; a new adapter/candidate refills it
+    folder = stage_dir(f"explore_{variant['name']}")
+    run_src = submission_run_src(variant["config"])
+    write_submission_kernel(folder, run_src, dataset_sources=dataset_sources_for(variant["config"]))
+    push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
+    if push.busy:
+        return state, f"explore[{variant['name']}] push BUSY; retrying next tick"
+    if not push.ok:
+        return state, f"explore[{variant['name']}] push FAILED: {push.error}"
+    explore_inflight = {
+        "kernel": SUBMISSION_KERNEL,
+        "version": push.version,
+        "variant": variant["name"],
+        "config": variant["config"],
+    }
+    new_state = {
+        **state,
+        "explore_inflight": explore_inflight,
+        # Tried is marked at LAUNCH (not submit): an ERROR'd commit must not
+        # re-enter the rotation forever in an unattended loop.
+        "explored": sorted({*explored, variant["name"]}),
+        "gpu_hours_week": quota + EXPLORE_COMMIT_HOURS,
+    }
+    return new_state, f"launched explore[{variant['name']}] commit v{push.version}"
 
 
 def tick(client: KaggleClient, state: dict, today: str) -> dict:
@@ -665,6 +820,7 @@ def tick(client: KaggleClient, state: dict, today: str) -> dict:
     `SUBMISSION_LOG.md` append at the end."""
     state = _ensure_week_start(state, today)
     state, lb_msg = _reconcile_pending_lb(client, state, today)
+    state, explore_msg = _dispatch_explore(client, state, today)
 
     if state.get("inflight"):
         state, msg = _dispatch_inflight(client, state, today)
@@ -675,7 +831,13 @@ def tick(client: KaggleClient, state: dict, today: str) -> dict:
     else:
         state, msg = _maybe_launch_backlog(client, state)
 
-    status = "; ".join(m for m in (lb_msg, msg) if m)
+    # Exploration launch AFTER the main branch: it can run concurrently with a
+    # train (different kernels; Kaggle allows 2 GPU sessions), and running it
+    # last lets its collision guard see a SUBMISSION_KERNEL the main branch
+    # claimed THIS tick.
+    state, explore_launch_msg = _maybe_launch_explore(client, state, today)
+
+    status = "; ".join(m for m in (lb_msg, explore_msg, msg, explore_launch_msg) if m)
     _log_status(today, status)
     return state
 

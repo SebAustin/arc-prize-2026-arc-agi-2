@@ -35,6 +35,11 @@ ADAPTER_MOUNT = f"/kaggle/input/datasets/{ADAPTER_DATASET_SLUG}"
 
 WEEKLY_GPU_HOUR_QUOTA = 25.0
 
+# An exploration submission's commit-run cost: the placeholder fast-path canary
+# (~12 tasks) on T4. The hidden-set scoring rerun after `competitions submit`
+# runs on Kaggle's competition compute, not our quota.
+EXPLORE_COMMIT_HOURS = 1.5
+
 # Public-eval canary size for every autopilot eval (candidate gate + backlog evals).
 # The model solves <1% of tasks, so a 40-task slice reads 0/40 even for a working
 # pipeline and the promotion gate (correct >= best_eval_correct + 1) can almost never

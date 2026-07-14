@@ -192,7 +192,12 @@ def test_train_complete_with_no_adapter_file_discards(autopilot):
         "kernel": mod.TRAIN_KERNEL, "version": 3, "kind": "train",
         "purpose": "backlog:adapter_hard_2500", "config": dict(state["live_config"]),
     }
-    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["COMPLETE"]}, output_files={})
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.TRAIN_KERNEL: ["COMPLETE"]},
+        output_files={},
+        push_queue=[busy],  # the now-idle tick may try an explore launch; stand down
+    )
     new_state = mod.tick(client, state, "2026-07-12")
 
     assert new_state["inflight"] is None
@@ -239,15 +244,20 @@ def test_eval_complete_without_improvement_discards_candidate(autopilot):
         "purpose": "measure candidate", "config": cfg,
     }
     summary_text = "summary: {'score': 0.2, 'correct': 9, 'total': 40, 'num_tasks': 40}\n"
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
     client = FakeKaggleClient(
         status_queue={mod.SUBMISSION_KERNEL: ["COMPLETE"]},
         output_files={mod.SUBMISSION_KERNEL: {"eval_summary.txt": summary_text}},
+        push_queue=[busy],  # the now-idle tick may try an explore launch; stand down
     )
     new_state = mod.tick(client, state, "2026-07-12")
 
     assert new_state["candidate"] is None
     assert new_state["inflight"] is None
     assert new_state["gated_candidate"] is None
+    # Discarded from the GATED path — but the adapter candidate keeps its
+    # exploration lottery ticket (Kaggle ranks the best submission).
+    assert [v["name"] for v in new_state["extra_exploration_variants"]] == ["adapter-eval-v7"]
 
 
 def test_eval_complete_with_no_summary_discards_candidate(autopilot):
@@ -259,7 +269,12 @@ def test_eval_complete_with_no_summary_discards_candidate(autopilot):
         "kernel": mod.SUBMISSION_KERNEL, "version": 7, "kind": "eval",
         "purpose": "measure candidate", "config": cfg,
     }
-    client = FakeKaggleClient(status_queue={mod.SUBMISSION_KERNEL: ["COMPLETE"]}, output_files={})
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["COMPLETE"]},
+        output_files={},
+        push_queue=[busy],  # the now-idle tick may try an explore launch; stand down
+    )
     new_state = mod.tick(client, state, "2026-07-12")
 
     assert new_state["candidate"] is None
@@ -607,6 +622,20 @@ def test_kernel_status_unrecognized_output_is_unknown(autopilot, monkeypatch):
     assert mod.KaggleClient().kernel_status("owner/kernel") == "UNKNOWN"
 
 
+def test_kernel_status_404_is_unknown_not_error(autopilot, monkeypatch):
+    # "404 Client Error" contains the substring "ERROR" — the phantom-404 case
+    # (transient after a push; any no-active-session kernel since Kaggle's
+    # ~2026-07-14 API change) must NOT be misread as a run failure, or healthy
+    # runs get abandoned on the spot. UNKNOWN flows into the stale-guard.
+    mod = autopilot
+    stderr = (
+        "404 Client Error: Not Found for url: "
+        "https://api.kaggle.com/v1/kernels.KernelsApiService/GetKernelSessionStatus\n"
+    )
+    monkeypatch.setattr(mod.KaggleClient, "_run", _fake_run(stderr=stderr, returncode=1))
+    assert mod.KaggleClient().kernel_status("owner/kernel") == "UNKNOWN"
+
+
 def test_competition_submissions_parses_json(autopilot, monkeypatch):
     mod = autopilot
     row = {
@@ -666,6 +695,36 @@ def test_write_train_kernel_metadata_has_no_competition_sources(autopilot, tmp_p
     assert meta["dataset_sources"] == ["owner/corpus"]
 
 
+def _kaggle_slugify(title: str) -> str:
+    """Kaggle's title->slug rule (lowercase; non-alphanumeric runs -> hyphen)."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
+def test_kernel_titles_slugify_to_their_kernel_ids(autopilot, tmp_path):
+    # Kaggle hard-rejects (409, enforced ~2026-07-14) a push whose title does
+    # not slug-resolve to the kernel id — this killed the 07-14 08:00 tick.
+    ak = sys.modules["autopilot_kernels"]
+    sub = tmp_path / "sub_folder"
+    train = tmp_path / "train_folder"
+    ak.write_submission_kernel(sub, "print('run')\n")
+    ak.write_train_kernel(train, "print('train')\n")
+
+    for folder in (sub, train):
+        meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+        id_slug = meta["id"].split("/")[-1]
+        assert _kaggle_slugify(meta["title"]) == id_slug, meta
+
+
+def test_explicit_kernel_title_still_wins(autopilot, tmp_path):
+    ak = sys.modules["autopilot_kernels"]
+    folder = tmp_path / "custom_title_folder"
+    ak.write_submission_kernel(folder, "print('run')\n", title="my custom title")
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert meta["title"] == "my custom title"
+
+
 def test_backlog_items_have_expected_shape(autopilot):
     ak = sys.modules["autopilot_kernels"]
     names = [item["name"] for item in ak.BACKLOG]
@@ -721,6 +780,238 @@ def test_eval_run_src_respects_explicit_eval_limit(autopilot):
 
 
 # ---------------------------------------------------------------------------
+# push-failure retry semantics: a transient failure (e.g. the 2026-07-14 409)
+# must NOT knock a priority item out of line; 3 strikes still bounds it.
+# ---------------------------------------------------------------------------
+
+
+def test_push_failure_retries_same_backlog_item(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    push = mod.PushResult(ok=False, busy=False, version=None, error="409 Conflict")
+    client = FakeKaggleClient(push_queue=[push])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["backlog_index"] == 0  # NOT advanced — same item retries next tick
+    assert state["push_failures"] == 1
+    assert state["inflight"] is None
+
+
+def test_push_failure_skips_item_after_three_strikes(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    push = mod.PushResult(ok=False, busy=False, version=None, error="409 Conflict")
+    for day in ("2026-07-14", "2026-07-15", "2026-07-16"):
+        client = FakeKaggleClient(push_queue=[push])
+        state = mod.tick(client, state, day)
+
+    assert state["backlog_index"] == 1  # skipped only after 3 consecutive failures
+    assert state["push_failures"] == 0  # counter reset for the next item
+
+
+def test_push_success_resets_failure_counter(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["push_failures"] = 2
+    push = mod.PushResult(ok=True, busy=False, version=9, error=None)
+    client = FakeKaggleClient(push_queue=[push])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["inflight"]["purpose"] == "backlog:adapter_hard_2500"
+    assert state["push_failures"] == 0
+
+
+def test_busy_push_does_not_count_as_failure(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    push = mod.PushResult(ok=False, busy=True, version=None, error="2 GPU sessions")
+    client = FakeKaggleClient(push_queue=[push])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["push_failures"] == 0
+    assert state["backlog_index"] == 0
+
+
+# ---------------------------------------------------------------------------
+# exploration submissions — the second (submit-commit-only) lane that stops
+# the daily submission slot going unused while the eval gate can't fire
+# ---------------------------------------------------------------------------
+
+
+def test_exploration_variants_order_and_extras(autopilot):
+    ak = sys.modules["autopilot_kernels"]
+    state = {
+        "live_config": {"llm_kwargs": {"selection": "votes"}, "ttt_config": None},
+        "extra_exploration_variants": [{"name": "adapter-eval-v9", "config": {"a": 1}}],
+    }
+    variants = ak.exploration_variants(state)
+    assert [v["name"] for v in variants] == ["poe", "ttt96", "adapter-eval-v9"]
+    assert variants[0]["config"]["llm_kwargs"]["selection"] == "poe"
+    assert variants[1]["config"]["ttt_config"]["max_steps"] == 96
+
+
+def test_explore_commit_launches_alongside_running_train(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.TRAIN_KERNEL,
+        "version": 8,
+        "kind": "train",
+        "purpose": "backlog:adapter_hard_2500",
+        "config": {},
+        "since": "2026-07-14",
+    }
+    push = mod.PushResult(ok=True, busy=False, version=21, error=None)
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["RUNNING"]}, push_queue=[push])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["inflight"]["kind"] == "train"  # main slot untouched
+    assert state["explore_inflight"]["variant"] == "poe"
+    assert state["explore_inflight"]["kernel"] == mod.SUBMISSION_KERNEL
+    assert "poe" in state["explored"]  # tried is marked at launch
+
+
+def test_explore_skipped_when_main_slot_uses_submission_kernel(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 14,
+        "kind": "eval",
+        "purpose": "backlog:poe_regate",
+        "config": {},
+        "since": "2026-07-14",
+    }
+    client = FakeKaggleClient(status_queue={mod.SUBMISSION_KERNEL: ["RUNNING"]})
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["explore_inflight"] is None
+    assert all(call[0] != "kernel_push" for call in client.calls)
+
+
+def test_explore_complete_submits_and_sets_pending_lb(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["explore_inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 21,
+        "variant": "poe",
+        "config": {"llm_kwargs": {"selection": "poe"}},
+    }
+    state["explored"] = ["poe"]
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["COMPLETE"]}, push_queue=[busy]
+    )
+    state = mod.tick(client, state, "2026-07-15")
+
+    assert state["explore_inflight"] is None
+    assert state["last_submit_date"] == "2026-07-15"
+    assert state["pending_lb"]["ref"].endswith(":2026-07-15")
+    submits = [c for c in client.calls if c[0] == "competition_submit"]
+    assert submits and submits[0][1] == mod.SUBMISSION_KERNEL and submits[0][2] == 21
+
+
+def test_explore_respects_one_submission_per_day(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["last_submit_date"] = "2026-07-15"
+    push = mod.PushResult(ok=True, busy=False, version=9, error=None)
+    client = FakeKaggleClient(push_queue=[push])
+    state = mod.tick(client, state, "2026-07-15")
+
+    assert state["inflight"]["kind"] == "train"  # backlog still launches
+    assert state["explore_inflight"] is None  # but no second submission today
+    assert state["explored"] == []
+
+
+def test_explore_rotation_exhausted_no_launch(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["explored"] = ["poe", "ttt96"]
+    push = mod.PushResult(ok=True, busy=False, version=9, error=None)
+    client = FakeKaggleClient(push_queue=[push])
+    state = mod.tick(client, state, "2026-07-16")
+
+    assert state["explore_inflight"] is None
+
+
+def test_explore_error_clears_slot_and_variant_stays_tried(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["explore_inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 21,
+        "variant": "poe",
+        "config": {},
+    }
+    state["explored"] = ["poe"]
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["ERROR"]}, push_queue=[busy]
+    )
+    state = mod.tick(client, state, "2026-07-15")
+
+    assert state["explore_inflight"] is None
+    assert "poe" in state["explored"]  # no unattended retry loop
+    assert all(c[0] != "competition_submit" for c in client.calls)
+
+
+def test_gate_failed_adapter_candidate_queued_for_exploration(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    adapter_config = {
+        "model_path": "m",
+        "adapter_path": "/kaggle/input/datasets/x/adapter",
+        "adapter_dataset": "x/adapter",
+    }
+    state["candidate"] = {"config": adapter_config, "adapter_dataset": "x/adapter"}
+    state["inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 13,
+        "kind": "eval",
+        "purpose": "measure trained candidate",
+        "config": adapter_config,
+        "since": "2026-07-15",
+    }
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["COMPLETE"]},
+        output_files={
+            mod.SUBMISSION_KERNEL: {
+                "eval_summary.txt": "summary: {'correct': 0, 'num_tasks': 120}"
+            }
+        },
+        push_queue=[busy],
+    )
+    state = mod.tick(client, state, "2026-07-15")
+
+    extras = state["extra_exploration_variants"]
+    assert [v["name"] for v in extras] == ["adapter-eval-v13"]
+    assert extras[0]["config"]["adapter_dataset"] == "x/adapter"
+    ak = sys.modules["autopilot_kernels"]
+    assert "adapter-eval-v13" in [v["name"] for v in ak.exploration_variants(state)]
+
+
+def test_eval_launch_defers_while_explore_holds_submission_kernel(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["candidate"] = {"config": {"model_path": "m"}, "adapter_dataset": None}
+    state["explore_inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 21,
+        "variant": "poe",
+        "config": {},
+    }
+    client = FakeKaggleClient(status_queue={mod.SUBMISSION_KERNEL: ["RUNNING"]})
+    state = mod.tick(client, state, "2026-07-15")
+
+    assert state["inflight"] is None  # eval deferred, not pushed
+    assert state["candidate"] is not None  # candidate preserved for next tick
+    assert all(call[0] != "kernel_push" for call in client.calls)
+
+
+# ---------------------------------------------------------------------------
 # staleness guard: an unresolved inflight is abandoned after STALE_INFLIGHT_DAYS
 # (protects the UNATTENDED loop from a phantom kernel — e.g. a 404 session)
 # ---------------------------------------------------------------------------
@@ -733,7 +1024,8 @@ def test_waiting_inflight_gets_since_stamp(autopilot):
         "kernel": mod.TRAIN_KERNEL, "version": 8, "kind": "train",
         "purpose": "x", "config": dict(state["live_config"]),
     }
-    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]})
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]}, push_queue=[busy])
     new_state = mod.tick(client, state, "2026-07-12")
     assert new_state["inflight"] is not None          # still waiting
     assert new_state["inflight"]["since"] == "2026-07-12"  # first-observed stamped
@@ -747,6 +1039,7 @@ def test_stale_inflight_is_abandoned(autopilot):
         "purpose": "x", "config": dict(state["live_config"]),
         "since": "2026-07-10",  # 2 days before `today` -> stale
     }
-    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]})
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["UNKNOWN"]}, push_queue=[busy])
     new_state = mod.tick(client, state, "2026-07-12")
     assert new_state["inflight"] is None  # abandoned, loop unwedged

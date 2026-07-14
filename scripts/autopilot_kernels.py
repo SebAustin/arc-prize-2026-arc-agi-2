@@ -40,6 +40,15 @@ from build_kaggle_notebook import build_submission, build_train_adapter
 # ---------------------------------------------------------------------------
 
 
+def _slug_title(kernel_id: str) -> str:
+    """Kaggle hard-rejects (409 'kernel title does not resolve to the specified
+    id', enforced ~2026-07-14; previously a warning) any push whose title does
+    not slugify to the kernel id's slug. The one title guaranteed to survive
+    any slugification rule is the slug itself — lowercase alphanumerics and
+    hyphens are a fixed point — so default titles are derived from the id."""
+    return kernel_id.split("/")[-1]
+
+
 def _notebook_code_cell(src: str) -> dict:
     return {
         "cell_type": "code",
@@ -98,7 +107,7 @@ def write_submission_kernel(
     model_sources: tuple[str, ...] = (BASE_MODEL_SOURCE,),
     competition_sources: tuple[str, ...] = (COMPETITION_SLUG,),
     kernel_id: str = SUBMISSION_KERNEL,
-    title: str = "ARC-AGI-2 autopilot submission",
+    title: str | None = None,  # None -> derived from kernel_id (must slug-resolve to it)
 ) -> Path:
     """Build a push-ready submission-kernel folder with `run_cell_src` as its
     run cell. Used for both the real commit-run (submit_commit) and
@@ -112,7 +121,7 @@ def write_submission_kernel(
     _write_kernel_metadata(
         folder,
         kernel_id=kernel_id,
-        title=title,
+        title=title or _slug_title(kernel_id),
         code_file=notebook_name,
         dataset_sources=list(dataset_sources or []),
         model_sources=list(model_sources),
@@ -127,7 +136,7 @@ def write_train_kernel(
     dataset_sources: list[str] | None = None,
     model_sources: tuple[str, ...] = (BASE_MODEL_SOURCE,),
     kernel_id: str = TRAIN_KERNEL,
-    title: str = "ARC-AGI-2 autopilot training",
+    title: str | None = None,  # None -> derived from kernel_id (must slug-resolve to it)
 ) -> Path:
     """Same as `write_submission_kernel` but for the Rung-4 training notebook
     (no competition data needed — training only touches the corpus dataset)."""
@@ -140,7 +149,7 @@ def write_train_kernel(
     _write_kernel_metadata(
         folder,
         kernel_id=kernel_id,
-        title=title,
+        title=title or _slug_title(kernel_id),
         code_file=notebook_name,
         dataset_sources=list(dataset_sources or []),
         model_sources=list(model_sources),
@@ -290,6 +299,38 @@ def _build_adapter_hard_6000(state: dict) -> Path:
 
 def _config_adapter_hard_6000(state: dict) -> dict:
     return {**state["live_config"], "adapter_path": None}
+
+
+# ---------------------------------------------------------------------------
+# Exploration variants — untried configs worth an otherwise-idle day's
+# submission slot. Kaggle ranks the account's BEST submission, so an ungated
+# submission can never lower the final standing; at <1% ability the eval gate
+# almost never fires, which left the free daily slot unused for 6 straight
+# days (2026-07-08 -> 07-14). Each variant is submitted at most once
+# (state["explored"] bookkeeping in daily_autopilot).
+# ---------------------------------------------------------------------------
+
+
+def exploration_variants(state: dict) -> list[dict]:
+    """Ordered [{name, config}] rotation: static config tweaks first, then any
+    gate-failed candidates queued by `daily_autopilot` (a trained adapter that
+    can't prove itself on the canary still gets its lottery ticket)."""
+    live = state.get("live_config", {})
+    variants = [
+        {
+            "name": "poe",
+            "config": {
+                **live,
+                "llm_kwargs": {**(live.get("llm_kwargs") or {}), "selection": "poe"},
+            },
+        },
+        {
+            "name": "ttt96",
+            "config": {**live, "ttt_config": {**(live.get("ttt_config") or {}), "max_steps": 96}},
+        },
+    ]
+    variants.extend(state.get("extra_exploration_variants", []))
+    return variants
 
 
 BACKLOG: list[dict] = [
