@@ -84,6 +84,12 @@ conflict) would each have been caught by a 20-minute canary.
   change made `kaggle kernels status` return **404 for kernels with no active
   session** — treat a 404 as UNKNOWN, never as a run failure ("404 Client Error"
   contains the substring "ERROR"; naive token-scans misread it).
+- **Kernels created before the ~2026-07-14 API migration can no longer be pushed to**:
+  `GetKernel` 500s on them and every `kernels push` fails with `Kernel push error:
+  Notebook not found` (misleading — the local notebook is fine). Newly-created kernel
+  ids work for both create and update (verified empirically). Remedy: migrate to fresh
+  kernel ids (`autopilot_config.SUBMISSION_KERNEL`/`TRAIN_KERNEL` did on 2026-07-14);
+  old kernels keep their history and past submissions but are write-dead.
 - `--accelerator` **overrides** `enable_gpu` from the metadata, and the server
   **silently accepts invalid names** — a typo yields a CPU-only run with no error.
   Only `NvidiaTeslaT4` and `NvidiaTeslaP100` are documented/valid GPU names; the

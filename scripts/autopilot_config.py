@@ -14,8 +14,14 @@ SUBMISSION_LOG_PATH = REPO_ROOT / "SUBMISSION_LOG.md"
 KERNEL_RUNS_DIR = REPO_ROOT / "artifacts" / "kernel_runs"
 
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-2"
-SUBMISSION_KERNEL = "sebmontreal/arc-agi-2-self-contained-submission-notebook"
-TRAIN_KERNEL = "sebmontreal/arc-agi-2-train-adapter-rung-4"
+# FRESH kernel ids (2026-07-14): Kaggle's api.kaggle.com migration left kernels
+# created before it broken server-side — GetKernel 500s and every push to them
+# fails "Kernel push error: Notebook not found" — while newly-created kernels
+# push fine (verified: create + v2 update both work). The pre-migration kernels
+# (arc-agi-2-self-contained-submission-notebook, arc-agi-2-train-adapter-rung-4)
+# keep their history (incl. the 0.83 submission) but can no longer be pushed to.
+SUBMISSION_KERNEL = "sebmontreal/arc-agi-2-autopilot-submit"
+TRAIN_KERNEL = "sebmontreal/arc-agi-2-autopilot-train"
 
 # The only push-time accelerator value that reliably works via the API — see
 # the module docstring / DEPLOYMENT.md Sec 3 for the L4x4-resets-to-P100 landmine.
