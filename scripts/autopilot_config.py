@@ -34,3 +34,11 @@ ADAPTER_DATASET_SLUG = "sebmontreal/arc-agi-2-adapter-autopilot"
 ADAPTER_MOUNT = f"/kaggle/input/datasets/{ADAPTER_DATASET_SLUG}"
 
 WEEKLY_GPU_HOUR_QUOTA = 25.0
+
+# The autopilot can only get T4x2 via the API (L4x4 is UI-only — landmine). A 7B
+# in fp16 fills ~13 of a T4's 14.5 GB, leaving almost nothing for per-task TTT's
+# LoRA activations — the default TTT config OOMs every task and the whole eval
+# degrades to DSL-only (and can flip the kernel to ERROR). These memory-safe TTT
+# settings (proven on the v7 canary) are merged UNDER any run's own ttt_config so
+# batch/seq stay T4-survivable while callers can still tune max_steps etc.
+T4_SAFE_TTT = {"batch_size": 1, "max_seq_len": 1536}

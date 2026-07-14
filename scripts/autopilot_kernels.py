@@ -29,6 +29,7 @@ from autopilot_config import (
     HARD_CORPUS_FILE,
     KERNEL_RUNS_DIR,
     SUBMISSION_KERNEL,
+    T4_SAFE_TTT,
     TRAIN_KERNEL,
 )
 from build_kaggle_notebook import build_submission, build_train_adapter
@@ -179,7 +180,8 @@ def eval_run_src(config: dict) -> str:
         "adapter_path": config.get("adapter_path"),
         "per_task_budget_s": config.get("per_task_budget_s", 150.0),
         "llm_kwargs": config.get("llm_kwargs"),
-        "ttt_config": config.get("ttt_config"),
+        # T4-safe TTT memory settings as the base; the run's own ttt_config wins.
+        "ttt_config": {**T4_SAFE_TTT, **(config.get("ttt_config") or {})},
         "limit": config.get("eval_limit", 40),
     }
     return (
@@ -200,7 +202,8 @@ def submission_run_src(config: dict) -> str:
         "adapter_path": config.get("adapter_path"),
         "llm_kwargs": config.get("llm_kwargs"),
         "use_ttt": True,
-        "ttt_config": config.get("ttt_config"),
+        # T4-safe TTT memory settings as the base; the run's own ttt_config wins.
+        "ttt_config": {**T4_SAFE_TTT, **(config.get("ttt_config") or {})},
         "num_workers": config.get("num_workers", 0),
     }
     return (
