@@ -40,6 +40,20 @@ from build_kaggle_notebook import build_submission, build_train_adapter
 # ---------------------------------------------------------------------------
 
 
+def submission_kernel_for(state: dict) -> str:
+    """The CURRENT submission-kernel id — state-owned, not fixed config.
+
+    Kaggle's 2026-07-14 API has a busy-create bug: a push that creates a NEW
+    kernel id but gets rejected on the GPU-session cap half-creates a broken
+    server record, and every later push to that id fails 'Notebook not found'
+    (verified empirically). The id is therefore a rotating sequence: base id,
+    then `-1`, `-2`, ... — `daily_autopilot` bumps `submission_kernel_seq`
+    whenever a create attempt burns an id, and pins the id once a push succeeds
+    (`submission_kernel_created`; successfully-created kernels update fine)."""
+    seq = int(state.get("submission_kernel_seq", 0))
+    return SUBMISSION_KERNEL if seq == 0 else f"{SUBMISSION_KERNEL}-{seq}"
+
+
 def _slug_title(kernel_id: str) -> str:
     """Kaggle hard-rejects (409 'kernel title does not resolve to the specified
     id', enforced ~2026-07-14; previously a warning) any push whose title does
@@ -269,7 +283,10 @@ def _build_poe_regate(state: dict) -> Path:
     folder = stage_dir("poe_regate")
     cfg = _config_poe_regate(state)
     sources = dataset_sources_for(cfg)
-    return write_submission_kernel(folder, eval_run_src(cfg), dataset_sources=sources)
+    return write_submission_kernel(
+        folder, eval_run_src(cfg), dataset_sources=sources,
+        kernel_id=submission_kernel_for(state),
+    )
 
 
 def _config_poe_regate(state: dict) -> dict:
@@ -282,7 +299,10 @@ def _build_ttt_steps_sweep(state: dict) -> Path:
     folder = stage_dir("ttt_steps_sweep")
     cfg = _config_ttt_steps_sweep(state)
     sources = dataset_sources_for(cfg)
-    return write_submission_kernel(folder, eval_run_src(cfg), dataset_sources=sources)
+    return write_submission_kernel(
+        folder, eval_run_src(cfg), dataset_sources=sources,
+        kernel_id=submission_kernel_for(state),
+    )
 
 
 def _config_ttt_steps_sweep(state: dict) -> dict:

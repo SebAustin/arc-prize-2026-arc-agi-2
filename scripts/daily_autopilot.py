@@ -78,7 +78,7 @@ from autopilot_config import (
     GPU_ACCELERATOR,
     KERNEL_RUNS_DIR,
     STATE_PATH,
-    SUBMISSION_KERNEL,
+    SUBMISSION_KERNEL,  # noqa: F401 — base id, re-exported for tests/operators
     SUBMISSION_LOG_PATH,
     TRAIN_KERNEL,
     WEEKLY_GPU_HOUR_QUOTA,
@@ -89,6 +89,7 @@ from autopilot_kernels import (
     eval_run_src,
     exploration_variants,
     stage_dir,
+    submission_kernel_for,
     submission_run_src,
     write_dataset_metadata,
     write_submission_kernel,
@@ -313,6 +314,11 @@ def default_state() -> dict:
         "explore_inflight": None,
         "explored": [],
         "extra_exploration_variants": [],
+        # Rotating submission-kernel id (Kaggle busy-create burn bug — see
+        # autopilot_kernels.submission_kernel_for): seq picks the id, created
+        # pins it once a push has succeeded (existing kernels update fine).
+        "submission_kernel_seq": 0,
+        "submission_kernel_created": False,
     }
 
 
@@ -623,22 +629,30 @@ def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]
     if state.get("explore_inflight"):
         return state, "submit_commit deferred: exploration commit holds the submission kernel"
     gated = state["gated_candidate"]
+    kernel_id = submission_kernel_for(state)
     folder = stage_dir("submit")
     run_src = submission_run_src(gated["config"])
-    write_submission_kernel(folder, run_src, dataset_sources=dataset_sources_for(gated["config"]))
+    write_submission_kernel(
+        folder, run_src,
+        dataset_sources=dataset_sources_for(gated["config"]),
+        kernel_id=kernel_id,
+    )
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
+    if rotated := _rotate_burned_submission_kernel(state, push):
+        return rotated
     if push.busy:
         return state, "submit push BUSY (2 GPU slots in use); retrying next tick"
     if not push.ok:
         return state, f"submit push FAILED: {push.error}"
     inflight = {
-        "kernel": SUBMISSION_KERNEL,
+        "kernel": kernel_id,
         "version": push.version,
         "kind": "submit_commit",
         "purpose": "commit-run the gated candidate for competition submit",
         "config": gated["config"],
     }
-    return {**state, "inflight": inflight}, f"pushed submit_commit v{push.version}"
+    new_state = {**state, "inflight": inflight, "submission_kernel_created": True}
+    return new_state, f"pushed submit_commit v{push.version}"
 
 
 def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
@@ -646,17 +660,21 @@ def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
     if state.get("explore_inflight"):
         return state, "eval deferred: exploration commit holds the submission kernel"
     candidate = state["candidate"]
+    kernel_id = submission_kernel_for(state)
     folder = stage_dir("eval")
     run_src = eval_run_src(candidate["config"])
     sources = dataset_sources_for(candidate["config"])
-    write_submission_kernel(folder, run_src, dataset_sources=sources)
+    write_submission_kernel(folder, run_src, dataset_sources=sources, kernel_id=kernel_id)
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
+    if rotated := _rotate_burned_submission_kernel(state, push):
+        return rotated
     if push.busy:
         return state, "eval push BUSY (2 GPU slots in use); retrying next tick"
     if not push.ok:
         return state, f"eval push FAILED: {push.error}"
+    state = {**state, "submission_kernel_created": True}
     inflight = {
-        "kernel": SUBMISSION_KERNEL,
+        "kernel": kernel_id,
         "version": push.version,
         "kind": "eval",
         "purpose": "measure trained candidate on the public-eval canary",
@@ -674,6 +692,27 @@ def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
 MAX_PUSH_FAILURES = 3
 
 
+def _rotate_burned_submission_kernel(state: dict, push: PushResult) -> tuple[dict, str] | None:
+    """Kaggle busy-create burn bug (2026-07-14, verified empirically): a push
+    that would CREATE a new kernel id but is rejected on the GPU-session cap
+    half-creates a broken record, and every later push to that id fails
+    'Notebook not found'. When a submission-kernel push fails before the id
+    ever had a successful push, rotate to the next `-N` id and retry next tick.
+    Returns (new_state, msg) when rotation applies, else None. Never counts as
+    a backlog strike — the failure isn't the item's fault."""
+    if state.get("submission_kernel_created"):
+        return None  # a successfully-created kernel updates fine; not a burn
+    text = (push.error or "").lower()
+    if not (push.busy or "notebook not found" in text):
+        return None
+    seq = int(state.get("submission_kernel_seq", 0)) + 1
+    new_state = {**state, "submission_kernel_seq": seq}
+    return new_state, (
+        f"submission kernel id burned (create rejected — Kaggle busy-create bug); "
+        f"rotated to {submission_kernel_for(new_state)}; retrying next tick"
+    )
+
+
 def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]:
     quota = state.get("gpu_hours_week", 0.0)
     if quota >= WEEKLY_GPU_HOUR_QUOTA:
@@ -684,6 +723,9 @@ def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]
     next_idx = (idx + 1) % len(BACKLOG)
     folder = item["build"](state)
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
+    if item["kind"] == "eval" and (rotated := _rotate_burned_submission_kernel(state, push)):
+        # Burned submission-kernel id, not the item's fault: no strike, no skip.
+        return rotated
     if push.busy:
         name = item["name"]
         return state, f"backlog[{name}] push BUSY (2 GPU slots in use); retrying next tick"
@@ -698,7 +740,11 @@ def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]
             f"retrying next tick: {push.error}"
         )
         return {**state, "push_failures": failures}, msg
-    kernel = TRAIN_KERNEL if item["kind"] == "train" else SUBMISSION_KERNEL
+    if item["kind"] == "eval":
+        state = {**state, "submission_kernel_created": True}
+        kernel = submission_kernel_for(state)
+    else:
+        kernel = TRAIN_KERNEL
     inflight = {
         "kernel": kernel,
         "version": push.version,
@@ -777,10 +823,10 @@ def _maybe_launch_explore(
     if state.get("gated_candidate") is not None:
         return state, None  # the gated path owns the next submission
     if state.get("candidate") is not None:
-        return state, None  # the main lane is about to claim SUBMISSION_KERNEL for eval
+        return state, None  # the main lane is about to claim the submission kernel for eval
     inflight = state.get("inflight")
-    if inflight and inflight.get("kernel") == SUBMISSION_KERNEL:
-        return state, None  # collision guard: main slot is using this kernel
+    if inflight and inflight.get("kind") in ("eval", "submit_commit"):
+        return state, None  # collision guard: main slot holds the submission kernel
     quota = state.get("gpu_hours_week", 0.0)
     if quota + EXPLORE_COMMIT_HOURS > WEEKLY_GPU_HOUR_QUOTA:
         return state, None
@@ -788,16 +834,23 @@ def _maybe_launch_explore(
     variant = next((v for v in exploration_variants(state) if v["name"] not in explored), None)
     if variant is None:
         return state, None  # rotation exhausted; a new adapter/candidate refills it
+    kernel_id = submission_kernel_for(state)
     folder = stage_dir(f"explore_{variant['name']}")
     run_src = submission_run_src(variant["config"])
-    write_submission_kernel(folder, run_src, dataset_sources=dataset_sources_for(variant["config"]))
+    write_submission_kernel(
+        folder, run_src,
+        dataset_sources=dataset_sources_for(variant["config"]),
+        kernel_id=kernel_id,
+    )
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
+    if rotated := _rotate_burned_submission_kernel(state, push):
+        return rotated
     if push.busy:
         return state, f"explore[{variant['name']}] push BUSY; retrying next tick"
     if not push.ok:
         return state, f"explore[{variant['name']}] push FAILED: {push.error}"
     explore_inflight = {
-        "kernel": SUBMISSION_KERNEL,
+        "kernel": kernel_id,
         "version": push.version,
         "variant": variant["name"],
         "config": variant["config"],
@@ -809,6 +862,7 @@ def _maybe_launch_explore(
         # re-enter the rotation forever in an unattended loop.
         "explored": sorted({*explored, variant["name"]}),
         "gpu_hours_week": quota + EXPLORE_COMMIT_HOURS,
+        "submission_kernel_created": True,
     }
     return new_state, f"launched explore[{variant['name']}] commit v{push.version}"
 

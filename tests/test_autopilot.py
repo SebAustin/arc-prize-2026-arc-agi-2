@@ -993,6 +993,80 @@ def test_gate_failed_adapter_candidate_queued_for_exploration(autopilot):
     assert "adapter-eval-v13" in [v["name"] for v in ak.exploration_variants(state)]
 
 
+# ---------------------------------------------------------------------------
+# rotating submission-kernel id — Kaggle busy-create burn bug (2026-07-14):
+# a create push rejected on the session cap half-creates a write-dead kernel;
+# the id must rotate, never strike the backlog item, never consume a variant.
+# ---------------------------------------------------------------------------
+
+
+def test_submission_kernel_for_rotates_by_seq(autopilot):
+    ak = sys.modules["autopilot_kernels"]
+    assert ak.submission_kernel_for({}) == ak.SUBMISSION_KERNEL
+    assert ak.submission_kernel_for({"submission_kernel_seq": 0}) == ak.SUBMISSION_KERNEL
+    assert ak.submission_kernel_for({"submission_kernel_seq": 3}) == f"{ak.SUBMISSION_KERNEL}-3"
+
+
+def test_busy_create_burns_and_rotates_then_next_tick_uses_new_id(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.TRAIN_KERNEL, "version": 1, "kind": "train",
+        "purpose": "backlog:adapter_hard_2500", "config": {}, "since": "2026-07-14",
+    }
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="2 GPU sessions")
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["RUNNING"]}, push_queue=[busy])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["submission_kernel_seq"] == 1  # busy-on-create burned the id
+    assert state["explore_inflight"] is None
+    assert state["explored"] == []  # the variant's ticket was NOT consumed
+
+    ok = mod.PushResult(ok=True, busy=False, version=1, error=None)
+    client2 = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["RUNNING"]}, push_queue=[ok])
+    state = mod.tick(client2, state, "2026-07-14")
+
+    assert state["explore_inflight"]["kernel"] == f"{mod.SUBMISSION_KERNEL}-1"
+    assert state["submission_kernel_created"] is True
+
+
+def test_created_submission_kernel_busy_does_not_rotate(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["submission_kernel_created"] = True
+    state["inflight"] = {
+        "kernel": mod.TRAIN_KERNEL, "version": 1, "kind": "train",
+        "purpose": "backlog:adapter_hard_2500", "config": {}, "since": "2026-07-14",
+    }
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="2 GPU sessions")
+    client = FakeKaggleClient(status_queue={mod.TRAIN_KERNEL: ["RUNNING"]}, push_queue=[busy])
+    state = mod.tick(client, state, "2026-07-14")
+
+    assert state["submission_kernel_seq"] == 0  # ordinary busy retry, no burn
+
+
+def test_notebook_not_found_on_eval_backlog_rotates_without_strike(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    state["backlog_index"] = 1  # poe_regate (kind=eval, pushes the submission kernel)
+    fail = mod.PushResult(ok=False, busy=False, version=None,
+                          error="Kernel push error: Notebook not found")
+    client = FakeKaggleClient(push_queue=[fail])
+    new_state, msg = mod._maybe_launch_backlog(client, state)
+
+    assert new_state["submission_kernel_seq"] == 1
+    assert new_state["backlog_index"] == 1  # item keeps its place in line
+    assert new_state["push_failures"] == 0  # a burned id is not the item's fault
+    assert "rotated" in msg
+
+
+def test_rotation_helper_ignores_ordinary_failures(autopilot):
+    mod = autopilot
+    state = mod.default_state()
+    fail = mod.PushResult(ok=False, busy=False, version=None, error="some metadata problem")
+    assert mod._rotate_burned_submission_kernel(state, fail) is None
+
+
 def test_eval_launch_defers_while_explore_holds_submission_kernel(autopilot):
     mod = autopilot
     state = mod.default_state()
