@@ -85,6 +85,7 @@ def main(
     epochs: int = 1,
     resume: bool = True,
     config_overrides: dict | None = None,
+    max_train_seconds: float | None = 39600.0,  # 11 h: stop+save before Kaggle's 12 h kill
 ) -> str:
     """Fine-tune a LoRA adapter on the synthetic corpus; return the output dir.
 
@@ -129,6 +130,7 @@ def main(
         output_dir,
         config=cfg,
         max_examples=max_examples,
+        max_train_seconds=max_train_seconds,
     )
     print(f"adapter saved -> {adapter_dir}")
     print(

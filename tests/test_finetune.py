@@ -121,3 +121,30 @@ def test_batches_to_skip(order_len, batch_size, resume_step, expected):
 def test_batches_to_skip_rejects_non_positive_batch_size():
     with pytest.raises(ValueError, match="batch_size"):
         _batches_to_skip(100, 0, 5)
+
+
+def test_grad_clip_default_present():
+    # fp16 NaN guard: grad clipping must be on by default (T4 has no bf16).
+    from arc.train.finetune import TrainConfig
+
+    assert TrainConfig().grad_clip == 1.0
+
+
+def test_finetune_accepts_max_train_seconds():
+    import inspect
+
+    from arc.train.finetune import finetune
+    sig = inspect.signature(finetune)
+    assert "max_train_seconds" in sig.parameters
+
+
+def test_kaggle_train_defaults_max_train_seconds_under_12h():
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "scripts" / "kaggle_train.py"
+    spec = importlib.util.spec_from_file_location("kaggle_train_mt", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    import inspect
+    default = inspect.signature(mod.main).parameters["max_train_seconds"].default
+    assert 0 < default < 12 * 3600  # stops+saves before Kaggle's 12h kill

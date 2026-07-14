@@ -58,6 +58,10 @@ class TrainConfig:
     dtype: str | None = None  # None = hardware-adaptive (see _resolve_dtype)
     checkpoint_every_steps: int = 200
     resume: bool = True
+    # T4 has no bf16, so LoRA trains in fp16 where unclipped gradients overflow to
+    # nan and silently corrupt the adapter (observed on the hard corpus). Clip
+    # every optimizer step, and skip any microbatch whose loss is non-finite.
+    grad_clip: float = 1.0
 
 
 def _tokenize(tokenizer, examples: list[TrainExample], max_seq_len: int):
@@ -164,6 +168,7 @@ def finetune(
     config: TrainConfig | None = None,
     device: str = "cuda",
     max_examples: int | None = None,
+    max_train_seconds: float | None = None,
 ) -> str:
     """Fine-tune a LoRA adapter on `examples`; save to `output_dir`; return it.
 
@@ -233,6 +238,8 @@ def finetune(
     examples_seen = state["examples_seen"]
     t_start = time.monotonic()
     total_steps_run = 0
+    nan_skips = 0
+    stop = False
 
     for epoch in range(start_epoch, cfg.epochs):
         gen = torch.Generator().manual_seed(cfg.seed + epoch)
@@ -253,8 +260,16 @@ def finetune(
                 attention_mask=attn.to(device),
                 labels=labels.to(device),
             )
-            (out.loss / cfg.grad_accum).backward()
+            if torch.isfinite(out.loss):
+                (out.loss / cfg.grad_accum).backward()
+            else:
+                # fp16 overflow: drop this microbatch's contribution rather than
+                # let a nan/inf backward poison the LoRA weights permanently.
+                nan_skips += 1
             if (step + 1) % cfg.grad_accum == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    (p for p in model.parameters() if p.requires_grad), cfg.grad_clip
+                )
                 optim.step()
                 optim.zero_grad()
 
@@ -282,10 +297,28 @@ def finetune(
                 _save_state(output_dir, epoch, step + 1, examples_seen)
                 _log.info("checkpoint saved at epoch=%d step=%d", epoch, step + 1)
 
-        _log.info("epoch %d/%d done", epoch + 1, cfg.epochs)
+            # Wall-clock guard: stop and SAVE before Kaggle's 12 h cap KILLS the
+            # kernel (which commits NO adapter — ERROR). A short run that saves a
+            # real adapter beats a long one that dies with nothing.
+            if (
+                max_train_seconds is not None
+                and (time.monotonic() - t_start) > max_train_seconds
+            ):
+                _log.info(
+                    "time budget %.0fs reached at step %d; stopping to save",
+                    max_train_seconds,
+                    step + 1,
+                )
+                stop = True
+                break
+
+        _log.info("epoch %d/%d done (nan_skips=%d)", epoch + 1, cfg.epochs, nan_skips)
         model.save_pretrained(str(checkpoint_dir), safe_serialization=True)
         _save_state(output_dir, epoch + 1, 0, examples_seen)
+        if stop:
+            break
 
     model.save_pretrained(output_dir, safe_serialization=True)  # write .safetensors
     tokenizer.save_pretrained(output_dir)
+    _log.info("adapter saved -> %s (nan_skips=%d)", output_dir, nan_skips)
     return output_dir
