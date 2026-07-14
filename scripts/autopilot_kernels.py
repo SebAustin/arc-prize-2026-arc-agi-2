@@ -209,6 +209,8 @@ def eval_run_src(config: dict) -> str:
         # Full 120-task public eval by default (None = all) so the promotion gate
         # can actually detect a sub-1% gain; a config may still override eval_limit.
         "limit": config.get("eval_limit", FULL_EVAL_LIMIT),
+        # Advisory KV-cache-integrity check for DFS-decode runs (no-op otherwise).
+        "dfs_selftest": config.get("dfs_selftest", False),
     }
     return (
         "import logging\n"
@@ -311,6 +313,24 @@ def _config_ttt_steps_sweep(state: dict) -> dict:
     return {**live, "ttt_config": ttt_config}
 
 
+def _build_dfs_regate(state: dict) -> Path:
+    folder = stage_dir("dfs_regate")
+    cfg = _config_dfs_regate(state)
+    sources = dataset_sources_for(cfg)
+    return write_submission_kernel(
+        folder, eval_run_src(cfg), dataset_sources=sources,
+        kernel_id=submission_kernel_for(state),
+    )
+
+
+def _config_dfs_regate(state: dict) -> dict:
+    """Rung 6: DFS/threshold decoding vs the live greedy config, A/B'd for free
+    by the standard promotion gate on the full public split."""
+    live = state.get("live_config", {})
+    llm_kwargs = {**(live.get("llm_kwargs") or {}), "decode": "dfs", "dfs_eps": 0.12}
+    return {**live, "llm_kwargs": llm_kwargs, "dfs_selftest": True}
+
+
 def _build_adapter_hard_6000(state: dict) -> Path:
     folder = stage_dir("adapter_hard_6000")
     run_src = train_run_src(max_examples=6000, config_overrides=_HARD_TRAIN_OVERRIDES)
@@ -348,6 +368,15 @@ def exploration_variants(state: dict) -> list[dict]:
             "name": "ttt96",
             "config": {**live, "ttt_config": {**(live.get("ttt_config") or {}), "max_steps": 96}},
         },
+        {
+            "name": "dfs",
+            "config": {
+                **live,
+                "llm_kwargs": {
+                    **(live.get("llm_kwargs") or {}), "decode": "dfs", "dfs_eps": 0.12,
+                },
+            },
+        },
     ]
     variants.extend(state.get("extra_exploration_variants", []))
     return variants
@@ -376,6 +405,14 @@ BACKLOG: list[dict] = [
         "config": _config_ttt_steps_sweep,
         # Full 120-task eval with 96 TTT adapt steps/task ~6 h.
         "estimated_hours": 6.0,
+    },
+    {
+        "name": "dfs_regate",
+        "kind": "eval",
+        "build": _build_dfs_regate,
+        "config": _config_dfs_regate,
+        # Full 120-task eval; DFS decode ~2x greedy decode cost (not TTT/scoring).
+        "estimated_hours": 7.0,
     },
     {
         "name": "adapter_hard_6000",

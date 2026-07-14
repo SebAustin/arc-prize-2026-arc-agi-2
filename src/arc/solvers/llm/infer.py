@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 from ...io.grid import Grid
 from ...io.loader import Pair
 from ...serialize.prompt import build_prompt, parse_completion
+from .dfs_decode import DfsStats, dfs_decode, top_k_for_eps
 from .model import LanguageModel
 
 
@@ -59,3 +61,43 @@ def generate_candidates_batch(
         grid = parse_completion(completion)
         out.append([grid] if grid is not None else [])
     return out
+
+
+def generate_candidates_dfs(
+    model,
+    train: Sequence[Pair],
+    test_input: Grid,
+    *,
+    eps: float,
+    max_new_tokens: int = 1024,
+    max_expansions: int = 3072,
+    max_candidates: int = 16,
+    deadline_s: float | None = None,
+) -> tuple[list[tuple[Grid, float]], DfsStats]:
+    """DFS-decode one (train, test_input): many grids, each with its
+    probability mass as the vote weight.
+
+    Leaves that parse to the SAME grid pool their mass (`exp(cum_logprob)` —
+    positive, so `rank_by_votes`' descending sort stays correct; raw negative
+    log-probs would invert it). `model` must expose `as_step_model()`
+    (HFModel does); callers gate on that.
+    """
+    prompt = build_prompt(train, test_input)
+    step_model = model.as_step_model(top_k=top_k_for_eps(eps))
+    cands, stats = dfs_decode(
+        step_model,
+        prompt,
+        eps=eps,
+        max_new_tokens=max_new_tokens,
+        max_expansions=max_expansions,
+        max_candidates=max_candidates,
+        deadline_s=deadline_s,
+    )
+    weights: dict[Grid, float] = {}
+    for cand in cands:
+        grid = parse_completion(cand.text)
+        if grid is None:
+            continue
+        weights[grid] = weights.get(grid, 0.0) + math.exp(cand.cum_logprob)
+    pairs = sorted(weights.items(), key=lambda kv: -kv[1])
+    return pairs, stats

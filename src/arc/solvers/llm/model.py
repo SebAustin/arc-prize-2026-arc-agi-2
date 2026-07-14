@@ -240,6 +240,15 @@ class HFModel:
             return float("-inf")
         return float(completion_lp.sum())
 
+    def as_step_model(self, top_k: int = 16):
+        """A stateful DFS decode session over this model (see dfs_decode.py).
+
+        Presence of this method is what opts HFModel into `decode="dfs"` —
+        models without it (e.g. MockModel) silently fall back to greedy."""
+        from .dfs_decode import HFStepModel  # noqa: PLC0415 — avoid import cycle
+
+        return HFStepModel(self, top_k=top_k)
+
     def generate_batch(
         self,
         prompts: list[str],

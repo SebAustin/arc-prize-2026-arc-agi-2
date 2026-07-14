@@ -48,6 +48,7 @@ def main(
     limit: int | None = 40,
     offset: int = 0,
     split: str = "evaluation",
+    dfs_selftest: bool = False,
 ) -> dict:
     cfg = get_config()
     model_path = model_path or os.environ.get("ARC_MODEL_PATH")
@@ -71,6 +72,17 @@ def main(
         from arc.solvers.llm import HFModel  # noqa: PLC0415 — lazy: imports torch
 
         model = HFModel(model_path, adapter_path=adapter_path)
+        if dfs_selftest and (llm_kwargs or {}).get("decode") == "dfs" and tasks:
+            # Advisory KV-cache-integrity check: DFS's first leaf must equal
+            # generate() greedy. A mismatch means cache/position corruption —
+            # warn loudly (results below would be suspect) but never crash.
+            from arc.serialize.prompt import build_prompt  # noqa: PLC0415
+            from arc.solvers.llm.dfs_decode import greedy_selftest  # noqa: PLC0415
+
+            first = next(iter(tasks.values()))
+            prompt = build_prompt(first.train, first.test[0].input)
+            ok, detail = greedy_selftest(model, prompt)
+            print(f"dfs_selftest: {'OK' if ok else 'WARNING — MISMATCH'} ({detail})")
         solvers = build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config)
     else:
         from arc.pipeline import default_solvers  # noqa: PLC0415

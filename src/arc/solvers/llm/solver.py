@@ -12,17 +12,24 @@ model into the same solver via the `model` argument.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from ...augment.task_aug import distinct_augs
 from ...io.loader import Task
 from ..base import Candidates, Solver
-from .infer import generate_candidates, generate_candidates_batch
+from .infer import generate_candidates, generate_candidates_batch, generate_candidates_dfs
 from .model import LanguageModel
 from .select import rank_by_votes, score_candidates, score_candidates_poe
 
+_log = logging.getLogger(__name__)
+
 # Candidate selection modes, in increasing strength (see select.py).
 SELECTION_MODES = ("votes", "likelihood", "poe")
+# Decode modes: one greedy completion per prompt, or a DFS token-tree search
+# returning every completion above a cumulative-probability threshold
+# (see dfs_decode.py). Greedy is the default — DFS is opt-in per config.
+DECODE_MODES = ("greedy", "dfs")
 
 
 class LLMSolver(Solver):
@@ -41,6 +48,9 @@ class LLMSolver(Solver):
         use_likelihood: bool = False,
         selection: str = "votes",
         poe_augs: int = 4,
+        decode: str = "greedy",
+        dfs_eps: float = 0.12,
+        dfs_max_expansions: int = 3072,
     ):
         self.model = model
         self.num_augs = num_augs
@@ -57,6 +67,13 @@ class LLMSolver(Solver):
             selection = "likelihood"
         self.selection = selection
         self.poe_augs = poe_augs
+        if decode not in DECODE_MODES:
+            raise ValueError(f"decode must be one of {DECODE_MODES}")
+        if decode == "dfs" and (num_samples != 1 or temperature > 0.0):
+            raise ValueError("decode='dfs' requires num_samples=1, temperature=0.0")
+        self.decode = decode
+        self.dfs_eps = dfs_eps
+        self.dfs_max_expansions = dfs_max_expansions
         self.last_telemetry: dict = {}
 
     def solve(self, task: Task, budget_s: float) -> Candidates:
@@ -66,17 +83,55 @@ class LLMSolver(Solver):
         augs_completed = 0
         decode_s = 0.0
         score_s = 0.0
+        dfs_nodes = 0
+        dfs_leaves = 0
+        # DFS needs a step-capable model; fall back to greedy otherwise so a
+        # config typo can never zero a Kaggle run (kill-switch direction).
+        use_dfs = self.decode == "dfs" and hasattr(self.model, "as_step_model")
+        if self.decode == "dfs" and not use_dfs:
+            _log.warning(
+                "decode='dfs' but %s has no as_step_model(); using greedy",
+                type(self.model).__name__,
+            )
         # One batched generate covers all augs when the model supports it and
-        # the config is greedy single-sample (the production default).
+        # the config is greedy single-sample (the production default). Checked
+        # AFTER dfs: a DFS config is greedy-shaped and would match this gate.
         use_batch = (
-            self.num_samples == 1
+            not use_dfs
+            and self.num_samples == 1
             and self.temperature == 0.0
             and hasattr(self.model, "generate_batch")
         )
 
         for i in range(len(task.test)):
             weighted: list[tuple] = []
-            if use_batch:
+            if use_dfs:
+                for j, aug in enumerate(augs):
+                    # Same discipline as the sequential loop below: the first
+                    # (identity) aug always runs; later augs stop past deadline.
+                    if j > 0 and time.monotonic() > deadline:
+                        break
+                    atask = aug.apply_task(task)
+                    t_dec = time.monotonic()
+                    pairs, stats = generate_candidates_dfs(
+                        self.model,
+                        atask.train,
+                        atask.test[i].input,
+                        eps=self.dfs_eps,
+                        max_new_tokens=self.max_new_tokens,
+                        max_expansions=self.dfs_max_expansions,
+                        # Enough leaves that voting sees real alternatives, but
+                        # bounded so one aug can't flood the tree budget.
+                        max_candidates=4 * self.max_candidates,
+                        deadline_s=deadline,
+                    )
+                    decode_s += time.monotonic() - t_dec
+                    augs_completed += 1
+                    dfs_nodes += stats.expansions
+                    dfs_leaves += stats.leaves
+                    for grid, weight in pairs:
+                        weighted.append((aug.invert_grid(grid), weight))
+            elif use_batch:
                 atasks = [aug.apply_task(task) for aug in augs]
                 t_dec = time.monotonic()
                 grid_lists = generate_candidates_batch(
@@ -149,5 +204,9 @@ class LLMSolver(Solver):
             "augs_planned": len(augs) * len(task.test),
             "decode_s": round(decode_s, 2),
             "score_s": round(score_s, 2),
+            # DFS work accounting (0 under greedy) — the instrument behind the
+            # "~2x greedy cost" claim on the Kaggle canary.
+            "dfs_nodes": dfs_nodes,
+            "dfs_leaves": dfs_leaves,
         }
         return per_test

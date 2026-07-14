@@ -729,12 +729,32 @@ def test_backlog_items_have_expected_shape(autopilot):
     ak = sys.modules["autopilot_kernels"]
     names = [item["name"] for item in ak.BACKLOG]
 
-    assert names == ["adapter_hard_2500", "poe_regate", "ttt_steps_sweep", "adapter_hard_6000"]
+    assert names == [
+        "adapter_hard_2500",
+        "poe_regate",
+        "ttt_steps_sweep",
+        "dfs_regate",
+        "adapter_hard_6000",
+    ]
     for item in ak.BACKLOG:
         assert item["kind"] in ("train", "eval")
         assert callable(item["build"])
         assert callable(item["config"])
         assert item["estimated_hours"] > 0
+
+
+def test_dfs_regate_config_enables_dfs_and_selftest(autopilot):
+    ak = sys.modules["autopilot_kernels"]
+    item = next(i for i in ak.BACKLOG if i["name"] == "dfs_regate")
+    state = {"live_config": {"llm_kwargs": {"selection": "votes"}}}
+    cfg = item["config"](state)
+
+    assert cfg["llm_kwargs"]["decode"] == "dfs"
+    assert cfg["llm_kwargs"]["dfs_eps"] == 0.12
+    assert cfg["llm_kwargs"]["selection"] == "votes"  # live keys preserved
+    assert cfg["dfs_selftest"] is True
+    # ... and the selftest knob reaches the generated eval run cell.
+    assert "'dfs_selftest': True" in ak.eval_run_src(cfg)
 
 
 def test_backlog_round_robins_and_wraps(autopilot):
@@ -845,9 +865,10 @@ def test_exploration_variants_order_and_extras(autopilot):
         "extra_exploration_variants": [{"name": "adapter-eval-v9", "config": {"a": 1}}],
     }
     variants = ak.exploration_variants(state)
-    assert [v["name"] for v in variants] == ["poe", "ttt96", "adapter-eval-v9"]
+    assert [v["name"] for v in variants] == ["poe", "ttt96", "dfs", "adapter-eval-v9"]
     assert variants[0]["config"]["llm_kwargs"]["selection"] == "poe"
     assert variants[1]["config"]["ttt_config"]["max_steps"] == 96
+    assert variants[2]["config"]["llm_kwargs"]["decode"] == "dfs"
 
 
 def test_explore_commit_launches_alongside_running_train(autopilot):
@@ -928,7 +949,7 @@ def test_explore_respects_one_submission_per_day(autopilot):
 def test_explore_rotation_exhausted_no_launch(autopilot):
     mod = autopilot
     state = mod.default_state()
-    state["explored"] = ["poe", "ttt96"]
+    state["explored"] = ["poe", "ttt96", "dfs"]  # every static variant tried
     push = mod.PushResult(ok=True, busy=False, version=9, error=None)
     client = FakeKaggleClient(push_queue=[push])
     state = mod.tick(client, state, "2026-07-16")
