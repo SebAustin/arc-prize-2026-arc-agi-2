@@ -227,14 +227,24 @@ class KaggleClient:
         return create_proc.returncode == 0 and not re.search(r"error", text2, re.IGNORECASE)
 
     def competition_submit(self, kernel: str, version: int, message: str) -> bool:
+        # `-f submission.json` names the kernel's output file. Optional under
+        # the old API, REQUIRED since Kaggle's ~2026-07-14 migration — without
+        # it CreateCodeSubmission returns a bare "400 Bad Request" (this burned
+        # three exploration submissions before the cause was found).
         proc = self._run(
             [
                 "competitions", "submit", self.competition,
-                "-k", kernel, "-v", str(version), "-m", message,
+                "-k", kernel, "-v", str(version),
+                "-f", "submission.json", "-m", message,
             ]
         )
         text = f"{proc.stdout}\n{proc.stderr}"
-        return proc.returncode == 0 and not re.search(r"error", text, re.IGNORECASE)
+        ok = proc.returncode == 0 and not re.search(r"error", text, re.IGNORECASE)
+        if not ok:
+            # Surface the CLI's actual complaint — a bool alone cost a day of
+            # diagnosis per failure when the API contract changed.
+            logger.warning("competition_submit failed: %s", text.strip()[:500])
+        return ok
 
     def competition_submissions(self) -> list[Submission]:
         proc = self._run(["competitions", "submissions", self.competition, "--format", "json"])

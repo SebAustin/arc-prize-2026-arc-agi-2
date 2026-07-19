@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -620,6 +621,53 @@ def test_kernel_status_unrecognized_output_is_unknown(autopilot, monkeypatch):
     mod = autopilot
     monkeypatch.setattr(mod.KaggleClient, "_run", _fake_run(stdout="garbled nonsense\n"))
     assert mod.KaggleClient().kernel_status("owner/kernel") == "UNKNOWN"
+
+
+def test_competition_submit_passes_output_file_flag(autopilot, monkeypatch):
+    # Kaggle's ~2026-07-14 API migration made `-f <output file>` REQUIRED for
+    # code-competition submits (bare 400 without it — burned 3 explore slots).
+    mod = autopilot
+    seen_args = []
+
+    def _run(self, args):
+        seen_args.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod.KaggleClient, "_run", _run)
+    ok = mod.KaggleClient().competition_submit("owner/kernel", 5, "msg")
+
+    assert ok
+    args = seen_args[0]
+    f_idx = args.index("-f")
+    assert args[f_idx + 1] == "submission.json"
+
+
+def test_competition_submit_logs_cli_text_on_failure(autopilot, monkeypatch, caplog):
+    mod = autopilot
+    monkeypatch.setattr(
+        mod.KaggleClient,
+        "_run",
+        _fake_run(stderr="400 Client Error: Bad Request for url: .../CreateCodeSubmission",
+                  returncode=1),
+    )
+    with caplog.at_level(logging.WARNING, logger="arc.autopilot"):
+        ok = mod.KaggleClient().competition_submit("owner/kernel", 5, "msg")
+
+    assert not ok
+    assert any("400" in r.message for r in caplog.records)
+
+
+def test_heavy_eval_items_cap_eval_limit_under_12h(autopilot):
+    # Full-120 evals with PoE/TTT-96 CANCELed at Kaggle's 12 h cap (v2/v4,
+    # 2026-07-17/18) yielding ZERO results; heavy items must cap their slice.
+    ak = sys.modules["autopilot_kernels"]
+    state = {"live_config": {"llm_kwargs": {"selection": "votes"}}}
+    by_name = {i["name"]: i["config"](state) for i in ak.BACKLOG}
+
+    assert by_name["poe_regate"]["eval_limit"] == 80
+    assert by_name["ttt_steps_sweep"]["eval_limit"] == 60
+    assert by_name["dfs_regate"]["eval_limit"] == 80
+    assert "eval_limit" not in by_name["adapter_hard_2500"]  # train items untouched
 
 
 def test_kernel_status_404_is_unknown_not_error(autopilot, monkeypatch):

@@ -294,7 +294,9 @@ def _build_poe_regate(state: dict) -> Path:
 def _config_poe_regate(state: dict) -> dict:
     live = state.get("live_config", {})
     llm_kwargs = {**(live.get("llm_kwargs") or {}), "selection": "poe"}
-    return {**live, "llm_kwargs": llm_kwargs}
+    # eval_limit: PoE's extra score_sum passes overran Kaggle's 12 h cap on the
+    # full 120 (v2 CANCELed 2026-07-17 with zero results). 80 tasks ≈ 8 h.
+    return {**live, "llm_kwargs": llm_kwargs, "eval_limit": 80}
 
 
 def _build_ttt_steps_sweep(state: dict) -> Path:
@@ -310,7 +312,9 @@ def _build_ttt_steps_sweep(state: dict) -> Path:
 def _config_ttt_steps_sweep(state: dict) -> dict:
     live = state.get("live_config", {})
     ttt_config = {**(live.get("ttt_config") or {}), "max_steps": 96}
-    return {**live, "ttt_config": ttt_config}
+    # eval_limit: 96 TTT adapt steps add minutes/task; the full 120 overran the
+    # 12 h cap (v4 CANCELed 2026-07-18 with zero results). 60 tasks ≈ 7-8 h.
+    return {**live, "ttt_config": ttt_config, "eval_limit": 60}
 
 
 def _build_dfs_regate(state: dict) -> Path:
@@ -325,10 +329,12 @@ def _build_dfs_regate(state: dict) -> Path:
 
 def _config_dfs_regate(state: dict) -> dict:
     """Rung 6: DFS/threshold decoding vs the live greedy config, A/B'd for free
-    by the standard promotion gate on the full public split."""
+    by the standard promotion gate."""
     live = state.get("live_config", {})
     llm_kwargs = {**(live.get("llm_kwargs") or {}), "decode": "dfs", "dfs_eps": 0.12}
-    return {**live, "llm_kwargs": llm_kwargs, "dfs_selftest": True}
+    # eval_limit: DFS ~2x decode cost; the full 120 would flirt with the 12 h
+    # cap that CANCELed the poe/ttt evals. 80 tasks ≈ 7 h with headroom.
+    return {**live, "llm_kwargs": llm_kwargs, "dfs_selftest": True, "eval_limit": 80}
 
 
 def _build_adapter_hard_6000(state: dict) -> Path:
