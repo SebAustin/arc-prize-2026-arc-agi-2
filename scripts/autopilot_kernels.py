@@ -29,6 +29,8 @@ from autopilot_config import (
     HARD_CORPUS_DATASET,
     HARD_CORPUS_FILE,
     KERNEL_RUNS_DIR,
+    MODEL_MOUNT_ROOT,
+    NVARC_SFT_MOUNT,
     SUBMISSION_KERNEL,
     T4_SAFE_TTT,
     TRAIN_KERNEL,
@@ -193,6 +195,16 @@ def dataset_sources_for(config: dict) -> list[str]:
     return []
 
 
+def model_sources_for(config: dict) -> tuple[str, ...]:
+    """The kernel's model attachment for `config` — derived from its
+    model_path so configs can swap base models (e.g. the NVARC SFT model)
+    without touching the builders. Falls back to the default base model."""
+    model_path = config.get("model_path") or BASE_MODEL_MOUNT
+    if model_path.startswith(MODEL_MOUNT_ROOT):
+        return (model_path[len(MODEL_MOUNT_ROOT):],)
+    return (BASE_MODEL_SOURCE,)
+
+
 # ---------------------------------------------------------------------------
 # Run-cell source generators — the actual `kaggle_*.main(...)` calls
 # ---------------------------------------------------------------------------
@@ -200,7 +212,7 @@ def dataset_sources_for(config: dict) -> list[str]:
 
 def eval_run_src(config: dict) -> str:
     kwargs = {
-        "model_path": BASE_MODEL_MOUNT,
+        "model_path": config.get("model_path") or BASE_MODEL_MOUNT,
         "adapter_path": config.get("adapter_path"),
         "per_task_budget_s": config.get("per_task_budget_s", 150.0),
         "llm_kwargs": config.get("llm_kwargs"),
@@ -226,7 +238,7 @@ def eval_run_src(config: dict) -> str:
 
 def submission_run_src(config: dict) -> str:
     kwargs = {
-        "model_path": BASE_MODEL_MOUNT,
+        "model_path": config.get("model_path") or BASE_MODEL_MOUNT,
         "adapter_path": config.get("adapter_path"),
         "llm_kwargs": config.get("llm_kwargs"),
         "use_ttt": True,
@@ -287,6 +299,7 @@ def _build_poe_regate(state: dict) -> Path:
     sources = dataset_sources_for(cfg)
     return write_submission_kernel(
         folder, eval_run_src(cfg), dataset_sources=sources,
+        model_sources=model_sources_for(cfg),
         kernel_id=submission_kernel_for(state),
     )
 
@@ -305,6 +318,7 @@ def _build_ttt_steps_sweep(state: dict) -> Path:
     sources = dataset_sources_for(cfg)
     return write_submission_kernel(
         folder, eval_run_src(cfg), dataset_sources=sources,
+        model_sources=model_sources_for(cfg),
         kernel_id=submission_kernel_for(state),
     )
 
@@ -323,8 +337,29 @@ def _build_dfs_regate(state: dict) -> Path:
     sources = dataset_sources_for(cfg)
     return write_submission_kernel(
         folder, eval_run_src(cfg), dataset_sources=sources,
+        model_sources=model_sources_for(cfg),
         kernel_id=submission_kernel_for(state),
     )
+
+
+def _build_nvarc_sft_regate(state: dict) -> Path:
+    folder = stage_dir("nvarc_sft_regate")
+    cfg = _config_nvarc_sft_regate(state)
+    return write_submission_kernel(
+        folder, eval_run_src(cfg),
+        dataset_sources=dataset_sources_for(cfg),
+        model_sources=model_sources_for(cfg),
+        kernel_id=submission_kernel_for(state),
+    )
+
+
+def _config_nvarc_sft_regate(state: dict) -> dict:
+    """Base-model swap A/B: the ARC Prize 2025 winners' grid-SFT'd Qwen3-4B
+    (their single model scored 24.03 private) under OUR TTT/voting stack, vs
+    the live config's un-fine-tuned Qwen2.5-Coder-7B. No adapter — their SFT
+    replaces it. 4B also halves decode time and leaves TTT headroom on T4."""
+    live = state.get("live_config", {})
+    return {**live, "model_path": NVARC_SFT_MOUNT, "adapter_path": None}
 
 
 def _config_dfs_regate(state: dict) -> dict:
@@ -363,6 +398,12 @@ def exploration_variants(state: dict) -> list[dict]:
     can't prove itself on the canary still gets its lottery ticket)."""
     live = state.get("live_config", {})
     variants = [
+        {
+            # Highest-expected-value ticket (research 2026-07-19): the 2025
+            # winners' grid-SFT'd Qwen3-4B swapped in as the base model.
+            "name": "nvarc_sft",
+            "config": {**live, "model_path": NVARC_SFT_MOUNT, "adapter_path": None},
+        },
         {
             "name": "poe",
             "config": {
@@ -411,6 +452,16 @@ BACKLOG: list[dict] = [
         "config": _config_ttt_steps_sweep,
         # Full 120-task eval with 96 TTT adapt steps/task ~6 h.
         "estimated_hours": 6.0,
+    },
+    {
+        # Research-ranked #1 (2026-07-19): the 2025 winners' SFT'd Qwen3-4B
+        # under our stack. Inserted at index 3 so the live cursor hits it next.
+        "name": "nvarc_sft_regate",
+        "kind": "eval",
+        "build": _build_nvarc_sft_regate,
+        "config": _config_nvarc_sft_regate,
+        # Full 120 fits easily: 4B halves decode time vs the 7B.
+        "estimated_hours": 4.0,
     },
     {
         "name": "dfs_regate",

@@ -23,3 +23,11 @@ architecture realistically reaches single digits → low-teens — the autopilot
 | 2026-07-14 | - | - | - | launched backlog[adapter_hard_2500] (train) v1; explore[poe] push BUSY; retrying next tick |
 | 2026-07-14 | - | - | - | waiting: train kernel sebmontreal/arc-agi-2-autopilot-train v1 status=RUNNING; explore[poe] push FAILED: Kernel push error: Notebook not found |
 | 2026-07-14 | - | - | - | waiting: train kernel sebmontreal/arc-agi-2-autopilot-train v1 status=RUNNING; submission kernel id burned (create rejected — Kaggle busy-create bug); rotated to sebmontreal/arc-agi-2-autopilot-submit-2; retrying next tick |
+| 2026-07-15 | - | - | - | train COMPLETE but adapter dataset staging FAILED; launched explore[poe] commit v1 |
+| 2026-07-16 | - | - | - | explore competition_submit FAILED for v1; launched backlog[poe_regate] (eval) v2 |
+| 2026-07-16 | - | - | - | waiting: eval kernel sebmontreal/arc-agi-2-autopilot-submit-2 v2 status=RUNNING |
+| 2026-07-17 | - | - | - | FAILED: eval kernel sebmontreal/arc-agi-2-autopilot-submit-2 v2 status=CANCEL; launched explore[ttt96] commit v3 |
+| 2026-07-17 | - | - | - | explore competition_submit FAILED for v3; launched backlog[ttt_steps_sweep] (eval) v4 |
+| 2026-07-18 | - | - | - | waiting: eval kernel sebmontreal/arc-agi-2-autopilot-submit-2 v4 status=RUNNING |
+| 2026-07-18 | - | - | - | FAILED: eval kernel sebmontreal/arc-agi-2-autopilot-submit-2 v4 status=CANCEL; launched explore[dfs] commit v5 |
+| 2026-07-19 | - | - | - | pending_lb: submission 54830777 has no numeric score yet; pushed eval v6 for candidate (sebmontreal/arc-agi-2-adapter-autopilot) |

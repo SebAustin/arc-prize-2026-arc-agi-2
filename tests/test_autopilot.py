@@ -657,6 +657,36 @@ def test_competition_submit_logs_cli_text_on_failure(autopilot, monkeypatch, cap
     assert any("400" in r.message for r in caplog.records)
 
 
+def test_model_sources_follow_config_model_path(autopilot):
+    # Base-model swaps (e.g. the NVARC SFT model) must carry the right kernel
+    # model attachment — a mount without its source silently 404s on Kaggle.
+    ak = sys.modules["autopilot_kernels"]
+    assert ak.model_sources_for({}) == (ak.BASE_MODEL_SOURCE,)
+    assert ak.model_sources_for({"model_path": ak.BASE_MODEL_MOUNT}) == (
+        ak.BASE_MODEL_SOURCE,
+    )
+    assert ak.model_sources_for({"model_path": ak.NVARC_SFT_MOUNT}) == (
+        "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1",
+    )
+
+
+def test_nvarc_sft_regate_swaps_base_model(autopilot, tmp_path):
+    ak = sys.modules["autopilot_kernels"]
+    item = next(i for i in ak.BACKLOG if i["name"] == "nvarc_sft_regate")
+    state = {"live_config": {"llm_kwargs": {"selection": "votes"}, "adapter_path": None}}
+    cfg = item["config"](state)
+
+    assert cfg["model_path"] == ak.NVARC_SFT_MOUNT
+    assert cfg["adapter_path"] is None
+    run_src = ak.eval_run_src(cfg)
+    assert "qwen3_4b_grids15_sft139" in run_src  # model_path reaches the run cell
+    folder = item["build"]({**state, "submission_kernel_seq": 2})
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert meta["model_sources"] == [
+        "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
+    ]
+
+
 def test_heavy_eval_items_cap_eval_limit_under_12h(autopilot):
     # Full-120 evals with PoE/TTT-96 CANCELed at Kaggle's 12 h cap (v2/v4,
     # 2026-07-17/18) yielding ZERO results; heavy items must cap their slice.
@@ -781,6 +811,7 @@ def test_backlog_items_have_expected_shape(autopilot):
         "adapter_hard_2500",
         "poe_regate",
         "ttt_steps_sweep",
+        "nvarc_sft_regate",
         "dfs_regate",
         "adapter_hard_6000",
     ]
@@ -913,10 +944,14 @@ def test_exploration_variants_order_and_extras(autopilot):
         "extra_exploration_variants": [{"name": "adapter-eval-v9", "config": {"a": 1}}],
     }
     variants = ak.exploration_variants(state)
-    assert [v["name"] for v in variants] == ["poe", "ttt96", "dfs", "adapter-eval-v9"]
-    assert variants[0]["config"]["llm_kwargs"]["selection"] == "poe"
-    assert variants[1]["config"]["ttt_config"]["max_steps"] == 96
-    assert variants[2]["config"]["llm_kwargs"]["decode"] == "dfs"
+    assert [v["name"] for v in variants] == [
+        "nvarc_sft", "poe", "ttt96", "dfs", "adapter-eval-v9",
+    ]
+    assert variants[0]["config"]["model_path"] == ak.NVARC_SFT_MOUNT
+    assert variants[0]["config"]["adapter_path"] is None
+    assert variants[1]["config"]["llm_kwargs"]["selection"] == "poe"
+    assert variants[2]["config"]["ttt_config"]["max_steps"] == 96
+    assert variants[3]["config"]["llm_kwargs"]["decode"] == "dfs"
 
 
 def test_explore_commit_launches_alongside_running_train(autopilot):
@@ -935,9 +970,9 @@ def test_explore_commit_launches_alongside_running_train(autopilot):
     state = mod.tick(client, state, "2026-07-14")
 
     assert state["inflight"]["kind"] == "train"  # main slot untouched
-    assert state["explore_inflight"]["variant"] == "poe"
+    assert state["explore_inflight"]["variant"] == "nvarc_sft"  # rotation head
     assert state["explore_inflight"]["kernel"] == mod.SUBMISSION_KERNEL
-    assert "poe" in state["explored"]  # tried is marked at launch
+    assert "nvarc_sft" in state["explored"]  # tried is marked at launch
 
 
 def test_explore_skipped_when_main_slot_uses_submission_kernel(autopilot):
@@ -997,7 +1032,7 @@ def test_explore_respects_one_submission_per_day(autopilot):
 def test_explore_rotation_exhausted_no_launch(autopilot):
     mod = autopilot
     state = mod.default_state()
-    state["explored"] = ["poe", "ttt96", "dfs"]  # every static variant tried
+    state["explored"] = ["nvarc_sft", "poe", "ttt96", "dfs"]  # every static variant tried
     push = mod.PushResult(ok=True, busy=False, version=9, error=None)
     client = FakeKaggleClient(push_queue=[push])
     state = mod.tick(client, state, "2026-07-16")

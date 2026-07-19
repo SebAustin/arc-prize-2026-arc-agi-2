@@ -27,3 +27,18 @@ Working assumptions made during the build, to revisit as milestones land.
   passed a local no-internet dry run; no speculative submits.
 - **Score target.** ~15–25% (the proven Kaggle-offline band). The 85% bonus is
   out of scope.
+
+## 2026-07-19 — NVARC (ARC Prize 2025 winner) asset adoption
+
+- **Assumption:** NVARC's released assets (github.com/1ytic/NVARC; Kaggle model
+  `sorokin/qwen3_4b_grids15_sft139`; datasets `sorokin/nvarc-synthetic-puzzles`,
+  `nvarc-augmented-puzzles`) are permissively licensed. Basis: ARC Prize 2025
+  rules required winners to open-source solutions under a permissive license to
+  receive the prize, and NVARC was paid 1st place (arcprize.org 2025 results).
+  The Kaggle dataset license TAGS read "unknown" and the repo page shows no
+  LICENSE file, so this is inferred, not confirmed.
+- **Action before relying on it for OUR final prize claim:** confirm the exact
+  license in the NVARC paper (nvarc_2025.pdf in their repo) or Kaggle writeup;
+  if unclear, ask in the competition forum. Using the public Kaggle model for
+  leaderboard experiments meanwhile is standard Kaggle practice (attach-only).
+- Verdict recorded here per the Rung-5 license-gating protocol.

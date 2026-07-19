@@ -88,6 +88,7 @@ from autopilot_kernels import (
     dataset_sources_for,
     eval_run_src,
     exploration_variants,
+    model_sources_for,
     stage_dir,
     submission_kernel_for,
     submission_run_src,
@@ -645,6 +646,7 @@ def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]
     write_submission_kernel(
         folder, run_src,
         dataset_sources=dataset_sources_for(gated["config"]),
+        model_sources=model_sources_for(gated["config"]),
         kernel_id=kernel_id,
     )
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
@@ -674,7 +676,11 @@ def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
     folder = stage_dir("eval")
     run_src = eval_run_src(candidate["config"])
     sources = dataset_sources_for(candidate["config"])
-    write_submission_kernel(folder, run_src, dataset_sources=sources, kernel_id=kernel_id)
+    write_submission_kernel(
+        folder, run_src, dataset_sources=sources,
+        model_sources=model_sources_for(candidate["config"]),
+        kernel_id=kernel_id,
+    )
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)
     if rotated := _rotate_burned_submission_kernel(state, push):
         return rotated
@@ -850,6 +856,7 @@ def _maybe_launch_explore(
     write_submission_kernel(
         folder, run_src,
         dataset_sources=dataset_sources_for(variant["config"]),
+        model_sources=model_sources_for(variant["config"]),
         kernel_id=kernel_id,
     )
     push = client.kernel_push(folder, accelerator=GPU_ACCELERATOR)

@@ -27,9 +27,20 @@ TRAIN_KERNEL = "sebmontreal/arc-agi-2-autopilot-train"
 # the module docstring / DEPLOYMENT.md Sec 3 for the L4x4-resets-to-P100 landmine.
 GPU_ACCELERATOR = "NvidiaTeslaT4"
 
+MODEL_MOUNT_ROOT = "/kaggle/input/models/"
+
 BASE_MODEL_MOUNT = "/kaggle/input/models/qwen-lm/qwen2.5-coder/transformers/7b/1"
 # model_sources entries are the mount path minus the "/kaggle/input/models/" root.
 BASE_MODEL_SOURCE = "qwen-lm/qwen2.5-coder/transformers/7b/1"
+
+# NVARC (ARC Prize 2025 1st place, 24.03 private with THIS model + their
+# harness): Qwen3-4B after their 139k-example grid SFT, published as a public
+# Kaggle model by the winners (mounted straight from their winning notebook's
+# metadata). 4B fp16 ~8GB also leaves real TTT headroom on a 14.5GB T4, unlike
+# our 7B. License: prize rules required winners to open-source permissively —
+# recorded as an assumption to verify in ASSUMPTIONS.md.
+NVARC_SFT_SOURCE = "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
+NVARC_SFT_MOUNT = MODEL_MOUNT_ROOT + NVARC_SFT_SOURCE
 
 HARD_CORPUS_DATASET = "sebmontreal/arc-synth-hard"
 HARD_CORPUS_FILE = "/kaggle/input/datasets/sebmontreal/arc-synth-hard/synth_hard_50k.jsonl"
