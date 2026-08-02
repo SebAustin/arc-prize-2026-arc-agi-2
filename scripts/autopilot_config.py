@@ -84,3 +84,69 @@ FULL_EVAL_LIMIT: int | None = None
 # settings (proven on the v7 canary) are merged UNDER any run's own ttt_config so
 # batch/seq stay T4-survivable while callers can still tune max_steps etc.
 T4_SAFE_TTT = {"batch_size": 1, "max_seq_len": 1536}
+
+
+# ---- Kaggle mount-path convention guard ------------------------------------
+# Two DISTINCT mount bugs each caused a week-long silent failure (adapter dataset
+# nested under an owner; model framework segment capitalized). Both are the same
+# root cause: a `/kaggle/input/...` constant that doesn't match how Kaggle
+# actually mounts the asset, discovered only after days of ERROR kernels. These
+# structural checks encode the conventions so the mistake fails a test (and the
+# autopilot's startup guard) instead of a week of runs. `scripts/verify_kaggle_
+# mounts.py` confirms the same constants resolve against the LIVE Kaggle API.
+
+_INPUT_PREFIX = "/kaggle/input/"
+
+
+def _mount_specs() -> list[tuple[str, str, str, str]]:
+    """(constant_name, mount_path, slug_or_source, kind) for every mount constant."""
+    return [
+        ("BASE_MODEL_MOUNT", BASE_MODEL_MOUNT, BASE_MODEL_SOURCE, "model"),
+        ("NVARC_SFT_MOUNT", NVARC_SFT_MOUNT, NVARC_SFT_SOURCE, "model"),
+        ("ADAPTER_MOUNT", ADAPTER_MOUNT, ADAPTER_DATASET_SLUG, "dataset"),
+        ("HARD_CORPUS_FILE", HARD_CORPUS_FILE, HARD_CORPUS_DATASET, "dataset"),
+    ]
+
+
+def check_one_mount(name: str, mount: str, ref: str, kind: str) -> list[str]:
+    """Structural violations for a single mount constant (empty == well-formed)."""
+    if not mount.startswith(_INPUT_PREFIX):
+        return [f"{name}: {mount!r} must start with {_INPUT_PREFIX!r}"]
+    segs = mount[len(_INPUT_PREFIX) :].split("/")
+    problems: list[str] = []
+    if kind == "model":
+        # Canonical: models/<owner>/<model>/<framework>/<variation>/<version>.
+        expected = MODEL_MOUNT_ROOT + ref
+        if mount != expected:
+            problems.append(f"{name}: {mount!r} != MODEL_MOUNT_ROOT + source ({expected!r})")
+        src = ref.split("/")
+        if len(src) != 5:
+            problems.append(
+                f"{name}: model source {ref!r} must be owner/model/framework/variation/version"
+            )
+        elif src[2] != src[2].lower():
+            # Kaggle mounts are case-sensitive and the framework slug is lowercase;
+            # a capitalized framework points at a path that never exists.
+            problems.append(
+                f"{name}: framework {src[2]!r} must be lowercase — use {src[2].lower()!r}"
+            )
+    else:  # dataset — mounts FLAT at /kaggle/input/<slug-basename>, owner stripped.
+        if segs[0] in ("models", "datasets"):
+            problems.append(f"{name}: dataset must not nest under /{segs[0]}/ (owner is stripped)")
+        basename = ref.split("/")[-1]
+        if segs[0] != basename:
+            problems.append(
+                f"{name}: first segment {segs[0]!r} must be the slug basename {basename!r}"
+                f" (owner stripped) — got {mount!r}"
+            )
+    return problems
+
+
+def check_mount_conventions() -> list[str]:
+    """Return all Kaggle mount-path convention violations across the autopilot's
+    path constants; empty means every constant is well-formed. See the block
+    comment above for the two conventions this enforces."""
+    problems: list[str] = []
+    for spec in _mount_specs():
+        problems.extend(check_one_mount(*spec))
+    return problems

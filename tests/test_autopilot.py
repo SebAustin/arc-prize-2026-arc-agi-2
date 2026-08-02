@@ -1117,6 +1117,55 @@ def test_kaggle_dataset_mounts_strip_owner():
     assert "/Transformers/" not in cfg.NVARC_SFT_MOUNT
 
 
+def test_mount_conventions_hold():
+    """Every live mount constant is well-formed (the pre-push guard)."""
+    import importlib
+
+    cfg = importlib.import_module("autopilot_config")
+    assert cfg.check_mount_conventions() == []
+
+
+def test_mount_checker_catches_both_historical_bugs():
+    """The checker flags the exact two shapes that each cost a week."""
+    import importlib
+
+    cfg = importlib.import_module("autopilot_config")
+    # Bug 1: dataset nested under owner / a /datasets/ segment.
+    assert cfg.check_one_mount(
+        "X", "/kaggle/input/datasets/owner/my-set", "owner/my-set", "dataset"
+    )
+    assert cfg.check_one_mount("X", "/kaggle/input/owner/my-set", "owner/my-set", "dataset")
+    # Bug 2: capitalized model framework segment.
+    caps = cfg.check_one_mount(
+        "X", "/kaggle/input/models/o/m/Transformers/v/1", "o/m/Transformers/v/1", "model"
+    )
+    assert any("lowercase" in c for c in caps)
+
+
+def test_mount_checker_accepts_canonical_forms():
+    import importlib
+
+    cfg = importlib.import_module("autopilot_config")
+    assert (
+        cfg.check_one_mount("X", "/kaggle/input/my-set/f.jsonl", "owner/my-set", "dataset") == []
+    )
+    assert (
+        cfg.check_one_mount(
+            "X", "/kaggle/input/models/o/m/transformers/v/1", "o/m/transformers/v/1", "model"
+        )
+        == []
+    )
+
+
+def test_main_aborts_on_mount_violation(autopilot, monkeypatch):
+    """The pre-RUN guard: main() refuses to do any Kaggle work if a mount constant
+    violates convention, instead of pushing a kernel doomed to ERROR."""
+    mod = autopilot
+    monkeypatch.setattr(mod, "check_mount_conventions", lambda: ["X: bad mount"])
+    with pytest.raises(SystemExit):
+        mod.main(["--dry-run"])
+
+
 def test_errored_eval_kernel_surfaces_traceback(autopilot):
     """On ERROR the tick pulls the kernel log and surfaces the traceback in its
     status line (not just 'status=ERROR') — the missing diagnosis that let a wrong

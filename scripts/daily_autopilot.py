@@ -82,6 +82,7 @@ from autopilot_config import (
     SUBMISSION_LOG_PATH,
     TRAIN_KERNEL,
     WEEKLY_GPU_HOUR_QUOTA,
+    check_mount_conventions,
 )
 from autopilot_kernels import (
     BACKLOG,
@@ -1008,6 +1009,19 @@ def main(argv: list[str] | None = None) -> None:
     if args.status:
         _print_status()
         return
+
+    # Fail fast if any Kaggle mount-path constant violates convention, rather than
+    # pushing a kernel that will ERROR on a non-existent path (the failure class
+    # that twice hid for a week). This is the pre-RUN guard; the test suite is the
+    # pre-PUSH guard.
+    violations = check_mount_conventions()
+    if violations:
+        for v in violations:
+            logger.error("mount-convention violation: %s", v)
+        raise SystemExit(
+            "aborting: Kaggle mount-path constant(s) violate convention "
+            "(fix scripts/autopilot_config.py; see errors above)"
+        )
 
     client: KaggleClient = DryRunKaggleClient() if args.dry_run else KaggleClient()
     state = load_state()
