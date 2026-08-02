@@ -77,6 +77,26 @@ def _corpus_stats(examples) -> dict:
     }
 
 
+def _load_corpus_examples(corpus_path: str, max_files: int | None = None) -> list:
+    """Load training examples from either a JSONL corpus (our synthetic corpus)
+    or a DIRECTORY of NVARC puzzle files (the 2025 winners' corpus, converted
+    IN-KERNEL — one leave-one-out example per file for maximal template
+    diversity). `max_files` bounds the directory walk so a huge corpus doesn't
+    blow the in-kernel load budget (finetune subsets further via max_examples)."""
+    from arc.synth import load_examples_jsonl, nvarc_file_to_examples  # noqa: PLC0415
+
+    if os.path.isdir(corpus_path):
+        files = sorted(glob.glob(os.path.join(corpus_path, "**", "*.json"), recursive=True))
+        if max_files is not None:
+            files = files[:max_files]
+        examples: list = []
+        for i, path in enumerate(files):
+            examples.extend(nvarc_file_to_examples(path, max_support=4, max_queries=1, seed=i))
+        print(f"loaded {len(examples)} examples from {len(files)} NVARC files under {corpus_path}")
+        return examples
+    return load_examples_jsonl(corpus_path)
+
+
 def main(
     base_model_path: str | None = None,
     corpus_path: str | None = None,
@@ -95,7 +115,6 @@ def main(
     `config_overrides` sets arbitrary `TrainConfig` fields (e.g.
     `{"checkpoint_every_steps": 100}`) without editing this script.
     """
-    from arc.synth import load_examples_jsonl  # noqa: PLC0415
     from arc.train.finetune import TrainConfig, finetune  # noqa: PLC0415
 
     base_model_path = base_model_path or os.environ.get("ARC_MODEL_PATH")
@@ -115,7 +134,7 @@ def main(
     print(f"corpus_path={corpus_path}")
     print(f"output_dir={output_dir}  max_examples={max_examples}  epochs={epochs}  resume={resume}")
 
-    examples = load_examples_jsonl(corpus_path)
+    examples = _load_corpus_examples(corpus_path, max_files=max_examples)
     stats = _corpus_stats(examples)
     print(f"corpus stats: {stats}")
 

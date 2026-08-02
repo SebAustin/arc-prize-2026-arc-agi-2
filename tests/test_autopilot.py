@@ -814,6 +814,7 @@ def test_backlog_items_have_expected_shape(autopilot):
         "nvarc_sft_regate",
         "dfs_regate",
         "adapter_hard_6000",
+        "adapter_nvarc",
     ]
     for item in ak.BACKLOG:
         assert item["kind"] in ("train", "eval")
@@ -1164,6 +1165,15 @@ def test_main_aborts_on_mount_violation(autopilot, monkeypatch):
     monkeypatch.setattr(mod, "check_mount_conventions", lambda: ["X: bad mount"])
     with pytest.raises(SystemExit):
         mod.main(["--dry-run"])
+
+
+def test_adapter_nvarc_backlog_item_wired(autopilot):
+    """Lever #2: a training backlog item retrains on the NVARC corpus, attaching
+    their public dataset and pointing the trainer at its mount dir."""
+    ak = sys.modules["autopilot_kernels"]
+    assert "adapter_nvarc" in [item["name"] for item in ak.BACKLOG]
+    src = ak.train_run_src(20000, {}, corpus_path=ak.NVARC_CORPUS_DIR)
+    assert ak.NVARC_CORPUS_DIR in src  # the trainer is pointed at the NVARC corpus dir
 
 
 def test_errored_eval_kernel_surfaces_traceback(autopilot):

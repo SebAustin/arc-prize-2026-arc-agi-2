@@ -70,3 +70,39 @@ def test_needs_at_least_two_pairs(tmp_path):
 def test_file_to_examples_end_to_end(tmp_path):
     path = _write(tmp_path, [_pair([[1]], [[2]]), _pair([[3]], [[4]]), _pair([[5]], [[6]])])
     assert len(nvarc_file_to_examples(path, max_support=2, max_queries=None)) == 3
+
+
+def test_kaggle_train_loads_nvarc_directory(tmp_path):
+    """The trainer reads a DIRECTORY of NVARC files (converting in-kernel), one
+    example per file — the retrain path that needs no derived-corpus upload."""
+    import kaggle_train
+
+    d = tmp_path / "nvarc_full" / "grp"
+    d.mkdir(parents=True)
+    for name in ("a", "b", "c"):
+        (d / f"{name}.json").write_text(
+            json.dumps([_pair([[1]], [[2]]), _pair([[3]], [[4]])])
+        )
+    examples = kaggle_train._load_corpus_examples(str(tmp_path))
+    assert len(examples) == 3  # 1 example/file x 3 files
+    assert examples[0].prompt.rstrip().endswith("Output:")
+
+
+def test_kaggle_train_directory_respects_max_files(tmp_path):
+    import kaggle_train
+
+    d = tmp_path / "nvarc_full"
+    d.mkdir(parents=True)
+    for i in range(5):
+        (d / f"{i}.json").write_text(json.dumps([_pair([[1]], [[2]]), _pair([[3]], [[4]])]))
+    assert len(kaggle_train._load_corpus_examples(str(tmp_path), max_files=2)) == 2
+
+
+def test_kaggle_train_still_loads_jsonl(tmp_path):
+    import kaggle_train
+    from arc.solvers.llm.ttt_data import TrainExample
+    from arc.synth import save_examples_jsonl
+
+    path = tmp_path / "corpus.jsonl"
+    save_examples_jsonl([TrainExample("Input:\n1\nOutput:", "\n2")], path)
+    assert len(kaggle_train._load_corpus_examples(str(path))) == 1

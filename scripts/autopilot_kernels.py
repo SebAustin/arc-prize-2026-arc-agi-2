@@ -30,6 +30,8 @@ from autopilot_config import (
     HARD_CORPUS_FILE,
     KERNEL_RUNS_DIR,
     MODEL_MOUNT_ROOT,
+    NVARC_CORPUS_DATASET,
+    NVARC_CORPUS_DIR,
     NVARC_SFT_MOUNT,
     SUBMISSION_KERNEL,
     T4_SAFE_TTT,
@@ -257,10 +259,12 @@ def submission_run_src(config: dict) -> str:
     )
 
 
-def train_run_src(max_examples: int, config_overrides: dict) -> str:
+def train_run_src(
+    max_examples: int, config_overrides: dict, corpus_path: str = HARD_CORPUS_FILE
+) -> str:
     kwargs = {
         "base_model_path": BASE_MODEL_MOUNT,
-        "corpus_path": HARD_CORPUS_FILE,
+        "corpus_path": corpus_path,
         "max_examples": max_examples,
         "epochs": 1,
         "config_overrides": config_overrides,
@@ -290,6 +294,23 @@ def _build_adapter_hard_2500(state: dict) -> Path:
 
 
 def _config_adapter_hard_2500(state: dict) -> dict:
+    return {**state["live_config"], "adapter_path": None}
+
+
+def _build_adapter_nvarc(state: dict) -> Path:
+    folder = stage_dir("adapter_nvarc")
+    # Retrain on the 2025 winners' curated corpus, converted IN-KERNEL (their
+    # public dataset attached directly — no derived-corpus re-upload). 20k
+    # templates ≈ our synth_50k scale, for an apples-to-apples data-quality read.
+    run_src = train_run_src(
+        max_examples=20000,
+        config_overrides=_HARD_TRAIN_OVERRIDES,
+        corpus_path=NVARC_CORPUS_DIR,
+    )
+    return write_train_kernel(folder, run_src, dataset_sources=[NVARC_CORPUS_DATASET])
+
+
+def _config_adapter_nvarc(state: dict) -> dict:
     return {**state["live_config"], "adapter_path": None}
 
 
@@ -477,5 +498,15 @@ BACKLOG: list[dict] = [
         "build": _build_adapter_hard_6000,
         "config": _config_adapter_hard_6000,
         "estimated_hours": 8.0,
+    },
+    {
+        # Research-ranked lever #2: retrain the adapter on the 2025 winners'
+        # curated synthetic corpus (attached directly, converted in-kernel).
+        # Appended at the tail so the live backlog cursor is undisturbed.
+        "name": "adapter_nvarc",
+        "kind": "train",
+        "build": _build_adapter_nvarc,
+        "config": _config_adapter_nvarc,
+        "estimated_hours": 5.0,
     },
 ]

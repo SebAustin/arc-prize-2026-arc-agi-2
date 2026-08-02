@@ -61,6 +61,15 @@ HARD_CORPUS_FILE = f"/kaggle/input/{HARD_CORPUS_DATASET.split('/')[-1]}/synth_ha
 ADAPTER_DATASET_SLUG = "sebmontreal/arc-agi-2-adapter-autopilot"
 ADAPTER_MOUNT = f"/kaggle/input/{ADAPTER_DATASET_SLUG.split('/')[-1]}"
 
+# The ARC Prize 2025 winners' curated synthetic puzzles (public). It is a
+# DIRECTORY of per-task JSON files (nvarc_full/<grp>/*.json), each a flat list of
+# {input,output} pairs — converted to training examples IN-KERNEL by
+# `arc.synth.nvarc`, so we attach their existing dataset directly instead of
+# re-uploading a derived corpus. Mounts flat, owner stripped (same convention as
+# every other dataset). Research-ranked lever #2: retrain the adapter on this.
+NVARC_CORPUS_DATASET = "sorokin/nvarc-synthetic-puzzles"
+NVARC_CORPUS_DIR = f"/kaggle/input/{NVARC_CORPUS_DATASET.split('/')[-1]}"
+
 WEEKLY_GPU_HOUR_QUOTA = 25.0
 
 # An exploration submission's commit-run cost: the placeholder fast-path canary
@@ -105,6 +114,7 @@ def _mount_specs() -> list[tuple[str, str, str, str]]:
         ("NVARC_SFT_MOUNT", NVARC_SFT_MOUNT, NVARC_SFT_SOURCE, "model"),
         ("ADAPTER_MOUNT", ADAPTER_MOUNT, ADAPTER_DATASET_SLUG, "dataset"),
         ("HARD_CORPUS_FILE", HARD_CORPUS_FILE, HARD_CORPUS_DATASET, "dataset"),
+        ("NVARC_CORPUS_DIR", NVARC_CORPUS_DIR, NVARC_CORPUS_DATASET, "dataset"),
     ]
 
 
