@@ -666,7 +666,7 @@ def test_model_sources_follow_config_model_path(autopilot):
         ak.BASE_MODEL_SOURCE,
     )
     assert ak.model_sources_for({"model_path": ak.NVARC_SFT_MOUNT}) == (
-        "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1",
+        "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1",
     )
 
 
@@ -683,7 +683,7 @@ def test_nvarc_sft_regate_swaps_base_model(autopilot, tmp_path):
     folder = item["build"]({**state, "submission_kernel_seq": 2})
     meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert meta["model_sources"] == [
-        "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
+        "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1"
     ]
 
 
