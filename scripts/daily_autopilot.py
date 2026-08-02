@@ -604,6 +604,60 @@ def _days_between(start_iso: str, end_iso: str) -> int:
         return 0
 
 
+_KERNEL_ERROR_RE = re.compile(
+    r"(Error|Exception|Traceback|raise |assert |CUDA|out of memory|OOM|"
+    r"ModuleNotFound|ImportError|ValueError|RuntimeError|KeyError|"
+    r"FileNotFoundError|Can't find|not found)",
+    re.IGNORECASE,
+)
+
+
+def _extract_kernel_error(out_dir: Path, max_chars: int = 600) -> str | None:
+    """Pull a concise error excerpt from a failed kernel's downloaded log.
+
+    Kaggle logs are a JSON array of {stream_name, data} events; flatten to text,
+    keep the lines that look like an error/traceback, and return the last few
+    (the final exception is almost always the actionable one). Falls back to the
+    raw tail if nothing matches. Returns None if no log is present."""
+    log_path = _find_first(out_dir, "*.log")
+    if log_path is None:
+        return None
+    try:
+        raw = log_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    text = raw
+    try:
+        events = json.loads(raw)
+        if isinstance(events, list):
+            text = "".join(e.get("data", "") for e in events if isinstance(e, dict))
+    except (ValueError, TypeError):
+        pass  # not the JSON-stream shape; scan the raw text as-is
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    hits = [ln for ln in lines if _KERNEL_ERROR_RE.search(ln)]
+    excerpt = " | ".join((hits or lines)[-4:])
+    return excerpt[:max_chars] or None
+
+
+def _diagnose_failed_kernel(client: KaggleClient, inflight: dict) -> str:
+    """Best-effort '; error: ...' suffix for a failed kernel's status line, built
+    from its downloaded log. NEVER raises — diagnosis must not wedge the tick."""
+    try:
+        dest = (
+            KERNEL_RUNS_DIR
+            / _safe_name(inflight["kernel"])
+            / f"v{inflight['version']}"
+            / "error"
+        )
+        out_dir = client.kernel_output(inflight["kernel"], dest)
+        excerpt = _extract_kernel_error(out_dir)
+        return f"; error: {excerpt}" if excerpt else ""
+    except Exception:
+        return ""
+
+
 def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[dict, str]:
     inflight = state["inflight"]
     status = client.kernel_status(inflight["kernel"]).upper()
@@ -617,8 +671,11 @@ def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[d
             return _finish_submit_commit(client, state, today, inflight)
         return {**state, "inflight": None}, f"unknown inflight kind={inflight['kind']!r}; clearing"
     if status in ("ERROR", "CANCEL"):
-        # Simple per-purpose failure: log and clear, no automatic retry loop.
-        return {**state, "inflight": None}, f"FAILED: {label} status={status}"
+        # Pull the kernel log so the failure is DIAGNOSABLE from our own status
+        # line, not just "status=ERROR". A missing traceback here let a wrong
+        # adapter mount path ERROR every eval for a week before anyone dug in.
+        detail = _diagnose_failed_kernel(client, inflight)
+        return {**state, "inflight": None}, f"FAILED: {label} status={status}{detail}"
     # Waiting (RUNNING/QUEUED/UNKNOWN). Guard the UNATTENDED case: a phantom
     # kernel that never resolves (e.g. Kaggle's session-status endpoint stuck on
     # 404, or a run that silently died) must not wedge the autopilot forever.

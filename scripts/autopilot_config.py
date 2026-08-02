@@ -42,13 +42,18 @@ BASE_MODEL_SOURCE = "qwen-lm/qwen2.5-coder/transformers/7b/1"
 NVARC_SFT_SOURCE = "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
 NVARC_SFT_MOUNT = MODEL_MOUNT_ROOT + NVARC_SFT_SOURCE
 
+# Kaggle mounts an attached DATASET at /kaggle/input/<slug> — the owner is
+# STRIPPED (only MODELS nest under /kaggle/input/models/<owner>/...). Building
+# the mount as /kaggle/input/datasets/<owner>/<slug> yields a path that does not
+# exist, so PEFT raised "Can't find 'adapter_config.json'" and every eval kernel
+# ERROR'd for a week. Derive the mount from the slug's basename only.
 HARD_CORPUS_DATASET = "sebmontreal/arc-synth-hard"
-HARD_CORPUS_FILE = "/kaggle/input/datasets/sebmontreal/arc-synth-hard/synth_hard_50k.jsonl"
+HARD_CORPUS_FILE = f"/kaggle/input/{HARD_CORPUS_DATASET.split('/')[-1]}/synth_hard_50k.jsonl"
 
 # The adapter dataset this autopilot stages+versions itself, each time a
 # training backlog item completes. One slug, versioned in place.
 ADAPTER_DATASET_SLUG = "sebmontreal/arc-agi-2-adapter-autopilot"
-ADAPTER_MOUNT = f"/kaggle/input/datasets/{ADAPTER_DATASET_SLUG}"
+ADAPTER_MOUNT = f"/kaggle/input/{ADAPTER_DATASET_SLUG.split('/')[-1]}"
 
 WEEKLY_GPU_HOUR_QUOTA = 25.0
 

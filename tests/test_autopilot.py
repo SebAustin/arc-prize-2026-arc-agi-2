@@ -1097,6 +1097,67 @@ def test_gate_failed_adapter_candidate_queued_for_exploration(autopilot):
     assert "adapter-eval-v13" in [v["name"] for v in ak.exploration_variants(state)]
 
 
+def test_kaggle_dataset_mounts_strip_owner():
+    """Regression: Kaggle mounts a DATASET at /kaggle/input/<slug> (owner stripped;
+    only MODELS nest under /kaggle/input/models/<owner>/...). Building the adapter
+    mount as /kaggle/input/datasets/<owner>/<slug> made PEFT raise "Can't find
+    'adapter_config.json'" and ERROR'd every eval kernel for a week."""
+    import importlib
+
+    cfg = importlib.import_module("autopilot_config")
+    assert cfg.ADAPTER_MOUNT == "/kaggle/input/arc-agi-2-adapter-autopilot"
+    assert "/datasets/" not in cfg.ADAPTER_MOUNT
+    assert cfg.ADAPTER_MOUNT.split("/")[-1] == cfg.ADAPTER_DATASET_SLUG.split("/")[-1]
+    assert "/datasets/" not in cfg.HARD_CORPUS_FILE
+    assert cfg.HARD_CORPUS_FILE == "/kaggle/input/arc-synth-hard/synth_hard_50k.jsonl"
+
+
+def test_errored_eval_kernel_surfaces_traceback(autopilot):
+    """On ERROR the tick pulls the kernel log and surfaces the traceback in its
+    status line (not just 'status=ERROR') — the missing diagnosis that let a wrong
+    adapter mount path ERROR every eval for a week go unnoticed."""
+    mod = autopilot
+    state = mod.default_state()
+    cfg = {"model_path": "m", "adapter_path": mod.ADAPTER_MOUNT}
+    state["inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL,
+        "version": 21,
+        "kind": "eval",
+        "purpose": "measure",
+        "config": cfg,
+        "since": "2026-08-02",
+    }
+    log_json = json.dumps(
+        [
+            {"stream_name": "stderr", "data": "Traceback (most recent call last):\n"},
+            {
+                "stream_name": "stderr",
+                "data": "ValueError: Can't find 'adapter_config.json' at /kaggle/input/x\n",
+            },
+        ]
+    )
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["ERROR"]},
+        output_files={mod.SUBMISSION_KERNEL: {"run.log": log_json}},
+    )
+    new_state, msg = mod._dispatch_inflight(client, state, "2026-08-02")
+    assert new_state["inflight"] is None  # cleared, as before
+    assert "status=ERROR" in msg
+    assert "adapter_config.json" in msg  # traceback excerpt surfaced in the status line
+
+
+def test_diagnose_failed_kernel_never_raises(autopilot):
+    """Diagnosis is best-effort: a client whose kernel_output blows up must yield
+    an empty suffix, never propagate — a failed diagnosis must not wedge the tick."""
+    mod = autopilot
+
+    class _Boom:
+        def kernel_output(self, *a, **k):
+            raise RuntimeError("network down")
+
+    assert mod._diagnose_failed_kernel(_Boom(), {"kernel": "k/x", "version": 1}) == ""
+
+
 # ---------------------------------------------------------------------------
 # rotating submission-kernel id — Kaggle busy-create burn bug (2026-07-14):
 # a create push rejected on the session cap half-creates a write-dead kernel;
