@@ -10,6 +10,7 @@ from .build_dataset import (
     tasks_to_examples,
 )
 from .generators import GENERATORS, HARD_GENERATORS, GeneratedTask, build_task, is_well_formed
+from .nvarc import load_nvarc_pairs, nvarc_examples, nvarc_file_to_examples
 
 __all__ = [
     "GENERATORS",
@@ -24,4 +25,7 @@ __all__ = [
     "generate_examples",
     "save_examples_jsonl",
     "load_examples_jsonl",
+    "load_nvarc_pairs",
+    "nvarc_examples",
+    "nvarc_file_to_examples",
 ]
