@@ -45,9 +45,13 @@ src/arc/
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                              # unit + property tests
+ruff check src/ scripts/ tests/    # lint gate (also enforced in CI)
+pytest                              # unit + property tests (149)
 python scripts/run_local_smoke.py --limit 40   # end-to-end smoke + score
 ```
+
+Lint (`ruff`) and tests run automatically on push/PR via
+[GitHub Actions](.github/workflows/ci.yml) across Python 3.10 and 3.13.
 
 ## Status
 
@@ -65,7 +69,15 @@ python scripts/run_local_smoke.py --limit 40   # end-to-end smoke + score
       per-task time budgeting across solvers, base-FT adapter loading, final
       `notebooks/submission.ipynb`.
 
-**The full pipeline (M0–M4) is built and CPU-verified — 130 passing tests.** What remains is
+- [x] **Review & hardening (agency pass)** — multi-perspective review (`CODEBASE.md`,
+      `SECURITY.md`), then robustness fixes on the scoring path: TTT now charges adaptation
+      time to its own budget and always restores the shared model on failure; a schema-valid
+      fallback submission is written *before* parsing so a malformed rerun file can't forfeit
+      the run; validated challenge loading, time-based checkpointing, structured
+      solver-failure logging, a DSL output-size cap, safetensors-only model loading, and a
+      `ruff` + CI gate. See `ACCEPTANCE.md`.
+
+**The full pipeline (M0–M4) is built and CPU-verified — 149 passing tests.** What remains is
 GPU execution on Kaggle (not buildable locally — the Mac has no CUDA).
 
 ### Easiest path: the self-contained notebook (no code dataset, no API token)

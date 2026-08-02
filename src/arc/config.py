@@ -50,12 +50,39 @@ def _detect_mode() -> str:
     return MODE_KAGGLE if _KAGGLE_INPUT.exists() else MODE_SMOKE
 
 
+def _find_kaggle_data_dir() -> Path | None:
+    """Locate the competition data under /kaggle/input.
+
+    Kaggle mounts the competition under a folder named after its slug, but rather
+    than trust a single hardcoded name we prefer the documented slug and
+    otherwise scan for whichever mounted folder actually contains the
+    test-challenges file (a couple of nesting levels deep). Returns None if
+    nothing matching is mounted.
+    """
+    if not _KAGGLE_INPUT.exists():
+        return None
+    if _KAGGLE_DATA.exists():
+        return _KAGGLE_DATA
+    fname = FILE_NAMES["test_challenges"]
+    for pattern in (f"*/{fname}", f"*/*/{fname}"):
+        for match in sorted(_KAGGLE_INPUT.glob(pattern)):
+            return match.parent
+    return None
+
+
 def _detect_data_dir() -> Path:
     override = os.environ.get("ARC_DATA_DIR")
     if override:
         return Path(override)
-    if _KAGGLE_DATA.exists():
-        return _KAGGLE_DATA
+    if _KAGGLE_INPUT.exists():
+        # On Kaggle: use the mounted competition data wherever it is; never fall
+        # back to a developer-machine path (that produces a baffling
+        # FileNotFoundError pointing at a box that isn't even running). If the
+        # data isn't attached yet, return the documented slug so the eventual
+        # error references a real /kaggle path — the entrypoint turns that into
+        # an actionable "attach the competition data" message.
+        found = _find_kaggle_data_dir()
+        return found if found is not None else _KAGGLE_DATA
     return _LOCAL_DATA
 
 

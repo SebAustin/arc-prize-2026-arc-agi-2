@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from ...io.grid import Grid
 from ...io.loader import Task
 from ..base import Candidates, Solver, apply_to_tests
 from .search import search
