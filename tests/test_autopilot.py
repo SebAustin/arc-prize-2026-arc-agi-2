@@ -1110,6 +1110,11 @@ def test_kaggle_dataset_mounts_strip_owner():
     assert cfg.ADAPTER_MOUNT.split("/")[-1] == cfg.ADAPTER_DATASET_SLUG.split("/")[-1]
     assert "/datasets/" not in cfg.HARD_CORPUS_FILE
     assert cfg.HARD_CORPUS_FILE == "/kaggle/input/arc-synth-hard/synth_hard_50k.jsonl"
+    # MODEL mounts are case-sensitive; the framework segment must be canonical
+    # lowercase "transformers" (matching the working base model), never "Transformers".
+    assert cfg.NVARC_SFT_MOUNT.startswith("/kaggle/input/models/")
+    assert "/transformers/" in cfg.NVARC_SFT_MOUNT
+    assert "/Transformers/" not in cfg.NVARC_SFT_MOUNT
 
 
 def test_errored_eval_kernel_surfaces_traceback(autopilot):

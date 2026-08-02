@@ -39,7 +39,13 @@ BASE_MODEL_SOURCE = "qwen-lm/qwen2.5-coder/transformers/7b/1"
 # metadata). 4B fp16 ~8GB also leaves real TTT headroom on a 14.5GB T4, unlike
 # our 7B. License: prize rules required winners to open-source permissively —
 # recorded as an assumption to verify in ASSUMPTIONS.md.
-NVARC_SFT_SOURCE = "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
+# Framework segment MUST be lowercase "transformers": Kaggle's API resolves model
+# refs case-insensitively, but the kernel MOUNT path is case-sensitive and uses the
+# canonical lowercase framework (the working Qwen base above proves this). A capital
+# "Transformers" here yields /kaggle/input/models/.../Transformers/... — a path that
+# doesn't exist at mount time, so the model fails to load (same failure class as the
+# week-long adapter-path bug). Verified against the live instance via the Kaggle CLI.
+NVARC_SFT_SOURCE = "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1"
 NVARC_SFT_MOUNT = MODEL_MOUNT_ROOT + NVARC_SFT_SOURCE
 
 # Kaggle mounts an attached DATASET at /kaggle/input/<slug> — the owner is
