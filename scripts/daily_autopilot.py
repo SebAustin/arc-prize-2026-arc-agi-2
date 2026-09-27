@@ -72,11 +72,11 @@ from pathlib import Path
 from autopilot_config import (
     ADAPTER_DATASET_SLUG,
     ADAPTER_MOUNT,
-    BASE_MODEL_MOUNT,
     COMPETITION_SLUG,
     EXPLORE_COMMIT_HOURS,
     GPU_ACCELERATOR,
     KERNEL_RUNS_DIR,
+    NVARC_SFT_MOUNT,
     STATE_PATH,
     SUBMISSION_KERNEL,  # noqa: F401 — base id, re-exported for tests/operators
     SUBMISSION_LOG_PATH,
@@ -309,7 +309,12 @@ def default_state() -> dict:
         "best_eval_correct": 0,
         "best_lb": 0.83,
         "live_config": {
-            "model_path": BASE_MODEL_MOUNT,
+            # NVARC 4B (the 2025 winners' SFT model), NOT our 7B: a 7B in fp16
+            # fills ~13 of a T4's 14.5 GB and leaves no room for per-task TTT's
+            # LoRA activations, so every candidate eval OOM'd on T4 — the exact
+            # failure that froze this loop for ~2 months. The 4B (~8 GB) leaves
+            # real TTT headroom and is what actually scored 24% on the private set.
+            "model_path": NVARC_SFT_MOUNT,
             "adapter_path": None,
             "llm_kwargs": {"selection": "votes"},
             "ttt_config": None,
@@ -323,6 +328,11 @@ def default_state() -> dict:
         "week_start": "",
         "backlog_index": 0,
         "push_failures": 0,
+        # Consecutive candidate-eval failures (ERROR/CANCEL, e.g. a T4 OOM). Once
+        # this reaches MAX_CANDIDATE_EVAL_FAILURES the candidate is discarded so
+        # the backlog can advance — a candidate that can't even complete an eval
+        # must never freeze the loop (root cause of the 2026-07→09 stall).
+        "candidate_eval_failures": 0,
         "explore_inflight": None,
         "explored": [],
         "extra_exploration_variants": [],
@@ -524,7 +534,8 @@ def _finish_train(client: KaggleClient, state: dict, inflight: dict) -> tuple[di
         "adapter_dataset": ADAPTER_DATASET_SLUG,
     }
     msg = f"train COMPLETE: adapter staged -> {ADAPTER_DATASET_SLUG}; candidate ready for eval"
-    return {**cleared, "candidate": candidate}, msg
+    # Fresh candidate -> fresh eval-failure budget (strikes never leak across candidates).
+    return {**cleared, "candidate": candidate, "candidate_eval_failures": 0}, msg
 
 
 def _finish_eval(client: KaggleClient, state: dict, inflight: dict) -> tuple[dict, str]:
@@ -533,7 +544,8 @@ def _finish_eval(client: KaggleClient, state: dict, inflight: dict) -> tuple[dic
     out_dir = client.kernel_output(inflight["kernel"], dest)
     summary = _find_summary(out_dir)
     candidate = state.get("candidate")
-    base_state = {**state, "inflight": None, "candidate": None}
+    # Candidate resolved (gated or discarded) -> reset its eval-failure budget.
+    base_state = {**state, "inflight": None, "candidate": None, "candidate_eval_failures": 0}
     if not summary or "correct" not in summary:
         return base_state, "eval COMPLETE but no summary parsed; discarding candidate"
     correct = int(summary["correct"])
@@ -659,6 +671,15 @@ def _diagnose_failed_kernel(client: KaggleClient, inflight: dict) -> str:
         return ""
 
 
+# A CANDIDATE eval that fails (ERROR/CANCEL, e.g. a T4 OOM) this many times in a
+# row is discarded so `_maybe_launch_backlog` can advance. Without this, the tick
+# re-launches the identical failing eval every day forever — exactly the stall
+# that froze `backlog_index` for ~2 months (7B base + per-task TTT LoRA OOMing a
+# T4's 14.5 GB). Two strikes separates a deterministic failure from a one-off
+# Kaggle hiccup while any real T4 eval still resolves in < 12 h.
+MAX_CANDIDATE_EVAL_FAILURES = 2
+
+
 def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[dict, str]:
     inflight = state["inflight"]
     status = client.kernel_status(inflight["kernel"]).upper()
@@ -676,7 +697,26 @@ def _dispatch_inflight(client: KaggleClient, state: dict, today: str) -> tuple[d
         # line, not just "status=ERROR". A missing traceback here let a wrong
         # adapter mount path ERROR every eval for a week before anyone dug in.
         detail = _diagnose_failed_kernel(client, inflight)
-        return {**state, "inflight": None}, f"FAILED: {label} status={status}{detail}"
+        cleared = {**state, "inflight": None}
+        # A CANDIDATE eval that keeps failing must NOT be re-launched forever:
+        # count strikes and discard the candidate once the failure is clearly
+        # deterministic, so the backlog can advance next tick. When a candidate
+        # is set inside dispatch, the inflight IS its eval — a backlog eval only
+        # ever launches while `candidate` is None (the `else` branch in tick()).
+        if inflight["kind"] == "eval" and state.get("candidate"):
+            failures = int(state.get("candidate_eval_failures", 0)) + 1
+            if failures >= MAX_CANDIDATE_EVAL_FAILURES:
+                discarded = {**cleared, "candidate": None, "candidate_eval_failures": 0}
+                return discarded, (
+                    f"FAILED: {label} status={status} (candidate eval x{failures}); "
+                    f"discarding candidate so backlog can advance{detail}"
+                )
+            return {**cleared, "candidate_eval_failures": failures}, (
+                f"FAILED: {label} status={status} "
+                f"(candidate eval {failures}/{MAX_CANDIDATE_EVAL_FAILURES}); "
+                f"retrying next tick{detail}"
+            )
+        return cleared, f"FAILED: {label} status={status}{detail}"
     # Waiting (RUNNING/QUEUED/UNKNOWN). Guard the UNATTENDED case: a phantom
     # kernel that never resolves (e.g. Kaggle's session-status endpoint stuck on
     # 404, or a run that silently died) must not wedge the autopilot forever.

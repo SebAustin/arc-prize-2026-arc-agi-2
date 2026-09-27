@@ -283,6 +283,76 @@ def test_eval_complete_with_no_summary_discards_candidate(autopilot):
 
 
 # ---------------------------------------------------------------------------
+# (b2) a candidate eval that keeps FAILING (ERROR/CANCEL, e.g. a T4 OOM) is
+# discarded after MAX_CANDIDATE_EVAL_FAILURES strikes so the backlog advances.
+# Regression for the ~2-month stall: a 7B+TTT candidate OOM'd every T4 eval and
+# the tick re-launched the identical failing eval forever (backlog_index frozen).
+# ---------------------------------------------------------------------------
+
+
+def _failing_candidate_eval_state(mod):
+    """State poised on a candidate eval that is inflight and about to fail."""
+    state = mod.default_state()
+    cfg = {**state["live_config"], "adapter_path": mod.ADAPTER_MOUNT}
+    state["candidate"] = {"config": cfg, "adapter_dataset": mod.ADAPTER_DATASET_SLUG}
+    state["inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL, "version": 52, "kind": "eval",
+        "purpose": "measure candidate", "config": cfg,
+    }
+    return state
+
+
+def test_candidate_eval_failure_strikes_but_keeps_candidate(autopilot):
+    mod = autopilot
+    state = _failing_candidate_eval_state(mod)
+    # One failure is below the threshold: keep the candidate for one more try
+    # (a single ERROR/CANCEL could be a transient Kaggle hiccup, not the config).
+    client = FakeKaggleClient(status_queue={mod.SUBMISSION_KERNEL: ["CANCEL"]})
+    new_state = mod.tick(client, state, "2026-09-27")
+
+    assert new_state["inflight"] is None                  # failed run cleared
+    assert new_state["candidate"] == state["candidate"]   # kept for one retry
+    assert new_state["candidate_eval_failures"] == 1
+
+
+def test_candidate_eval_discarded_after_max_failures(autopilot):
+    mod = autopilot
+    state = _failing_candidate_eval_state(mod)
+    state["candidate_eval_failures"] = mod.MAX_CANDIDATE_EVAL_FAILURES - 1  # one strike from out
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["ERROR"]},
+        push_queue=[busy],  # candidate clears this tick; the now-idle lane may try explore
+    )
+    new_state = mod.tick(client, state, "2026-09-27")
+
+    assert new_state["candidate"] is None            # discarded -> backlog unblocked next tick
+    assert new_state["candidate_eval_failures"] == 0  # budget reset for the next candidate
+    assert new_state["inflight"] is None
+
+
+def test_backlog_eval_failure_is_not_a_candidate_strike(autopilot):
+    """A backlog eval (launched only while candidate is None) that fails must not
+    touch the candidate-strike counter — the counter is precise to candidate evals."""
+    mod = autopilot
+    state = mod.default_state()
+    state["inflight"] = {
+        "kernel": mod.SUBMISSION_KERNEL, "version": 3, "kind": "eval",
+        "purpose": "backlog:nvarc_sft_regate", "config": dict(state["live_config"]),
+    }
+    busy = mod.PushResult(ok=False, busy=True, version=None, error="busy")
+    client = FakeKaggleClient(
+        status_queue={mod.SUBMISSION_KERNEL: ["ERROR"]},
+        push_queue=[busy],
+    )
+    new_state = mod.tick(client, state, "2026-09-27")
+
+    assert new_state["inflight"] is None
+    assert new_state["candidate"] is None
+    assert new_state["candidate_eval_failures"] == 0  # untouched: no candidate was in play
+
+
+# ---------------------------------------------------------------------------
 # (c) gated + not-submitted-today -> submit_commit pushed; COMPLETE -> submit
 # ---------------------------------------------------------------------------
 
