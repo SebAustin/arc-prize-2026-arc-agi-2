@@ -668,6 +668,21 @@ def test_kernel_push_detects_busy_from_gpu_session_error(autopilot, monkeypatch)
     assert result.version is None
 
 
+def test_kernel_push_detects_busy_from_weekly_quota_error(autopilot, monkeypatch):
+    """A spent weekly GPU quota is a CAPACITY limit, not the item's fault: it must
+    classify as busy (retry, no backlog strike) so a multi-day quota outage never
+    skips/scrambles the backlog and the loop auto-resumes when the quota resets."""
+    mod = autopilot
+    stdout = "Kernel push error: Maximum weekly GPU quota of 45.00 hours reached.\n"
+    monkeypatch.setattr(mod.KaggleClient, "_run", _fake_run(stdout=stdout))
+    result = mod.KaggleClient().kernel_push("some/folder")
+
+    assert result.busy
+    assert not result.ok
+    assert result.version is None
+    assert "weekly gpu quota" in (result.error or "").lower()
+
+
 def test_kernel_push_reports_other_errors(autopilot, monkeypatch):
     mod = autopilot
     stdout = "Kernel push error: some other kernel-metadata problem\n"

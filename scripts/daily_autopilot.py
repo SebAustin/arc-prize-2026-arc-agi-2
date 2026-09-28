@@ -186,8 +186,14 @@ class KaggleClient:
     def kernel_push(self, folder, accelerator: str = GPU_ACCELERATOR) -> PushResult:
         proc = self._run(["kernels", "push", "-p", str(folder), "--accelerator", accelerator])
         text = f"{proc.stdout}\n{proc.stderr}"
-        if re.search(r"maximum batch gpu session", text, re.IGNORECASE):
-            # Not an error: both GPU push slots are busy. Retry next tick.
+        if re.search(r"maximum (batch gpu session|weekly gpu quota)", text, re.IGNORECASE):
+            # An account-wide CAPACITY limit, never the item's fault: either both
+            # GPU push slots are busy ("batch gpu session count reached") or the
+            # weekly GPU-hour quota is spent ("weekly gpu quota reached"). Both mean
+            # "can't run now" -> treat as busy: retry next tick with NO backlog
+            # strike, so a multi-day quota outage never skips/scrambles the backlog
+            # and the loop auto-resumes the instant capacity returns. The real
+            # Kaggle text is preserved in `error` for the status log.
             return PushResult(ok=False, busy=True, version=None, error=text.strip())
         match = re.search(r"[Kk]ernel version (\d+) successfully pushed", text)
         if match:
@@ -751,7 +757,7 @@ def _launch_submit_commit(client: KaggleClient, state: dict) -> tuple[dict, str]
     if rotated := _rotate_burned_submission_kernel(state, push):
         return rotated
     if push.busy:
-        return state, "submit push BUSY (2 GPU slots in use); retrying next tick"
+        return state, "submit push deferred (GPU capacity: slots busy or quota spent); retrying"
     if not push.ok:
         return state, f"submit push FAILED: {push.error}"
     inflight = {
@@ -783,7 +789,7 @@ def _launch_eval(client: KaggleClient, state: dict) -> tuple[dict, str]:
     if rotated := _rotate_burned_submission_kernel(state, push):
         return rotated
     if push.busy:
-        return state, "eval push BUSY (2 GPU slots in use); retrying next tick"
+        return state, "eval push deferred (GPU capacity: slots busy or quota spent); retrying"
     if not push.ok:
         return state, f"eval push FAILED: {push.error}"
     state = {**state, "submission_kernel_created": True}
@@ -842,7 +848,12 @@ def _maybe_launch_backlog(client: KaggleClient, state: dict) -> tuple[dict, str]
         return rotated
     if push.busy:
         name = item["name"]
-        return state, f"backlog[{name}] push BUSY (2 GPU slots in use); retrying next tick"
+        # `busy` covers BOTH capacity limits now (session cap AND weekly quota):
+        # surface the real Kaggle reason so the log distinguishes them, and take
+        # NO strike (capacity is never the item's fault). The loop auto-resumes
+        # when capacity returns.
+        reason = (push.error or "GPU capacity limit").strip().splitlines()[-1][:140]
+        return state, f"backlog[{name}] push deferred (capacity); retrying next tick: {reason}"
     if not push.ok:
         name = item["name"]
         failures = int(state.get("push_failures", 0)) + 1
