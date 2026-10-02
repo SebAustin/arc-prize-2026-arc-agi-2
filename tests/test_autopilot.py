@@ -772,6 +772,38 @@ def test_nvarc_sft_regate_swaps_base_model(autopilot, tmp_path):
     ]
 
 
+def test_train_run_src_defaults_to_4b_base_and_honours_override(autopilot):
+    """A LoRA is base-specific, so the trainer's default base must match the live
+    EVAL default (NVARC 4B), not the 7B — otherwise every trained adapter is a
+    dimension-mismatched 7B LoRA that ERRORs on the 4B eval base."""
+    ak = sys.modules["autopilot_kernels"]
+    default_src = ak.train_run_src(2500, {})
+    assert ak.NVARC_SFT_MOUNT in default_src
+    assert ak.BASE_MODEL_MOUNT not in default_src  # the 7B is NOT the default train base
+    # an explicit base is threaded through (callers pass the live base)
+    assert ak.BASE_MODEL_MOUNT in ak.train_run_src(2500, {}, base_model_path=ak.BASE_MODEL_MOUNT)
+
+
+def test_adapter_train_items_attach_live_base_not_7b(autopilot):
+    """Regression (code-review spec axis, 2026-10-02): with the live base = NVARC
+    4B, every adapter train item must ATTACH the 4B (not write_train_kernel's 7B
+    default) so train base == eval base; otherwise the adapter levers silently die."""
+    ak = sys.modules["autopilot_kernels"]
+    four_b = "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1"
+    state = {
+        "live_config": {
+            "model_path": ak.NVARC_SFT_MOUNT, "adapter_path": None,
+            "llm_kwargs": {"selection": "votes"},
+        },
+        "submission_kernel_seq": 2,
+    }
+    for name in ("adapter_hard_2500", "adapter_hard_6000", "adapter_nvarc"):
+        item = next(i for i in ak.BACKLOG if i["name"] == name)
+        folder = item["build"](state)
+        meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+        assert meta["model_sources"] == [four_b], name
+
+
 def test_heavy_eval_items_cap_eval_limit_under_12h(autopilot):
     # Full-120 evals with PoE/TTT-96 CANCELed at Kaggle's 12 h cap (v2/v4,
     # 2026-07-17/18) yielding ZERO results; heavy items must cap their slice.

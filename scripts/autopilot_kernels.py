@@ -260,10 +260,17 @@ def submission_run_src(config: dict) -> str:
 
 
 def train_run_src(
-    max_examples: int, config_overrides: dict, corpus_path: str = HARD_CORPUS_FILE
+    max_examples: int,
+    config_overrides: dict,
+    corpus_path: str = HARD_CORPUS_FILE,
+    base_model_path: str = NVARC_SFT_MOUNT,
 ) -> str:
+    # base_model_path MUST match the base its candidate is later evaluated on
+    # (default NVARC 4B, the live default): a LoRA is base-specific, so a 7B-trained
+    # adapter loaded on the 4B eval base dimension-mismatches and ERRORs the eval.
+    # Callers derive it from the live/eval config so train base == eval base.
     kwargs = {
-        "base_model_path": BASE_MODEL_MOUNT,
+        "base_model_path": base_model_path,
         "corpus_path": corpus_path,
         "max_examples": max_examples,
         "epochs": 1,
@@ -287,10 +294,39 @@ def train_run_src(
 _HARD_TRAIN_OVERRIDES = {"batch_size": 1, "grad_accum": 16, "max_seq_len": 1024}
 
 
+def _build_adapter_train_kernel(
+    state: dict,
+    name: str,
+    *,
+    max_examples: int,
+    dataset_sources: list[str],
+    corpus_path: str = HARD_CORPUS_FILE,
+) -> Path:
+    """Stage an adapter-training kernel whose base model MATCHES the base its
+    candidate is later evaluated on (the live/eval base), and attach that same
+    model. A LoRA is base-specific: training on the 7B while the eval default is
+    the 4B yields a dimension-mismatched adapter that ERRORs every eval (and is
+    then discarded), silently disabling the adapter levers."""
+    cfg = {**state.get("live_config", {}), "adapter_path": None}
+    base = cfg.get("model_path") or NVARC_SFT_MOUNT
+    cfg = {**cfg, "model_path": base}  # keep model_sources in lockstep with the train base
+    run_src = train_run_src(
+        max_examples=max_examples,
+        config_overrides=_HARD_TRAIN_OVERRIDES,
+        corpus_path=corpus_path,
+        base_model_path=base,
+    )
+    return write_train_kernel(
+        stage_dir(name), run_src,
+        dataset_sources=dataset_sources,
+        model_sources=model_sources_for(cfg),
+    )
+
+
 def _build_adapter_hard_2500(state: dict) -> Path:
-    folder = stage_dir("adapter_hard_2500")
-    run_src = train_run_src(max_examples=2500, config_overrides=_HARD_TRAIN_OVERRIDES)
-    return write_train_kernel(folder, run_src, dataset_sources=[HARD_CORPUS_DATASET])
+    return _build_adapter_train_kernel(
+        state, "adapter_hard_2500", max_examples=2500, dataset_sources=[HARD_CORPUS_DATASET]
+    )
 
 
 def _config_adapter_hard_2500(state: dict) -> dict:
@@ -298,16 +334,13 @@ def _config_adapter_hard_2500(state: dict) -> dict:
 
 
 def _build_adapter_nvarc(state: dict) -> Path:
-    folder = stage_dir("adapter_nvarc")
     # Retrain on the 2025 winners' curated corpus, converted IN-KERNEL (their
     # public dataset attached directly — no derived-corpus re-upload). 20k
     # templates ≈ our synth_50k scale, for an apples-to-apples data-quality read.
-    run_src = train_run_src(
-        max_examples=20000,
-        config_overrides=_HARD_TRAIN_OVERRIDES,
-        corpus_path=NVARC_CORPUS_DIR,
+    return _build_adapter_train_kernel(
+        state, "adapter_nvarc", max_examples=20000,
+        dataset_sources=[NVARC_CORPUS_DATASET], corpus_path=NVARC_CORPUS_DIR,
     )
-    return write_train_kernel(folder, run_src, dataset_sources=[NVARC_CORPUS_DATASET])
 
 
 def _config_adapter_nvarc(state: dict) -> dict:
@@ -394,9 +427,9 @@ def _config_dfs_regate(state: dict) -> dict:
 
 
 def _build_adapter_hard_6000(state: dict) -> Path:
-    folder = stage_dir("adapter_hard_6000")
-    run_src = train_run_src(max_examples=6000, config_overrides=_HARD_TRAIN_OVERRIDES)
-    return write_train_kernel(folder, run_src, dataset_sources=[HARD_CORPUS_DATASET])
+    return _build_adapter_train_kernel(
+        state, "adapter_hard_6000", max_examples=6000, dataset_sources=[HARD_CORPUS_DATASET]
+    )
 
 
 def _config_adapter_hard_6000(state: dict) -> dict:
