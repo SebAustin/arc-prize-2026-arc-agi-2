@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from arc.augment import symmetry
+from arc.io.loader import Pair
 from arc.io.submission import build_submission, validate_submission
 from arc.pipeline import default_solvers, run
-from arc.serialize.prompt import build_prompt
 from arc.solvers.llm import LLMSolver, MockModel
 from arc.solvers.llm.infer import generate_candidates
 from arc.solvers.llm.select import score_candidates
-from arc.io.loader import Pair
 
 
 def _rot90(g):

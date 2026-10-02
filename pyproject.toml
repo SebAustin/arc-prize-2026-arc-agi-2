@@ -11,14 +11,17 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 # Installed only in the Kaggle/GPU environment (M1+). Kept out of the CPU dev
-# venv so local smoke runs stay light. Versions pinned at staging time.
+# venv so local smoke runs stay light. Lower bounds give a known-good
+# compatibility floor for Qwen2.5 + LoRA; freeze to exact `==` versions (ideally
+# with hashes) from the staged Kaggle wheel set before a real submission so
+# reruns are deterministic — see SECURITY.md (F2).
 gpu = [
-    "torch",
-    "transformers",
-    "peft",
-    "accelerate",
+    "torch>=2.3",
+    "transformers>=4.44",
+    "peft>=0.12",
+    "accelerate>=0.33",
 ]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -26,3 +29,13 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+# Focused, high-signal gate: pyflakes (unused/undefined), import order,
+# pyupgrade, and bugbear. Kept lean so it can run in CI on every push.
+select = ["E", "F", "I", "UP", "B"]

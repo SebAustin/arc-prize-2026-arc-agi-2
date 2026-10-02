@@ -17,13 +17,61 @@ Usage (inside the Kaggle notebook):
 from __future__ import annotations
 
 import argparse
+import hashlib
+import itertools
+import json
 import os
 import time
 
 from arc.config import get_config
-from arc.io.loader import load_challenges
-from arc.io.submission import build_submission, validate_submission
+from arc.io.loader import MalformedTaskError, load_challenges
+from arc.io.submission import (
+    build_submission,
+    empty_predictions,
+    fallback_from_raw,
+    validate_submission,
+    write_submission,
+)
+from arc.parallel import run_parallel
 from arc.pipeline import run as run_pipeline
+from arc.solvers.factory import DEFAULT_TTT_DATA_KWARGS as factory_ttt_data_kwargs
+from arc.solvers.factory import build_solvers
+
+
+def _require_data(challenges_path) -> None:
+    """Fail fast with an actionable message if the competition data is missing —
+    the common cause is simply that the competition dataset was never attached to
+    the notebook, which otherwise surfaces as a cryptic FileNotFoundError."""
+    if os.path.exists(challenges_path):
+        return
+    inp = "/kaggle/input"
+    mounted = sorted(os.listdir(inp)) if os.path.isdir(inp) else []
+    listing = "\n".join(f"    - {inp}/{m}" for m in mounted) or (
+        "    (nothing mounted under /kaggle/input)"
+    )
+    raise FileNotFoundError(
+        f"Competition data not found: {challenges_path}\n"
+        f"On Kaggle: use Add Input -> Competitions -> 'ARC Prize 2026 - ARC-AGI-2' "
+        f"so the data mounts under /kaggle/input/. Or set ARC_DATA_DIR to the folder "
+        f"that contains {os.path.basename(str(challenges_path))}.\n"
+        f"Currently mounted under /kaggle/input:\n{listing}"
+    )
+
+
+def _pre_write_fallback(challenges_path, submission_path) -> int:
+    """Write a complete, schema-valid fallback submission BEFORE any parsing or
+    model work, so a crash/OOM anywhere downstream still leaves a scoreable file
+    on disk. Returns the number of tasks covered (0 if the file is unreadable)."""
+    try:
+        with open(challenges_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        preds = fallback_from_raw(raw)
+        write_submission(build_submission(preds), submission_path)
+        return len(preds)
+    except Exception as exc:  # noqa: BLE001 — last-resort guard, never fatal
+        print(f"WARNING: could not pre-write fallback submission: {exc}")
+        return 0
+
 
 # Per-test-input augmentations / samples — tuned per model on Kaggle.
 DEFAULT_LLM_KWARGS = {
@@ -31,31 +79,37 @@ DEFAULT_LLM_KWARGS = {
     "num_samples": 1,
     "max_new_tokens": 1024,
     "temperature": 0.0,
+    # Re-rank voted candidates by the model's own log-likelihood: <=4 extra
+    # forward passes per test output (~1-2 s) for a materially better ordering.
+    "use_likelihood": True,
 }
-# Corpus size for per-task test-time training (leave-one-out x augmentation).
-DEFAULT_TTT_DATA_KWARGS = {"num_augs": 16, "max_examples": 250}
+# Corpus size for per-task test-time training (leave-one-out x augmentation) —
+# owned by arc.solvers.factory (shared with worker processes); re-exported here
+# for backward-compat import paths (e.g. `from kaggle_submit import
+# DEFAULT_TTT_DATA_KWARGS`).
+DEFAULT_TTT_DATA_KWARGS = factory_ttt_data_kwargs
+
+# sha256 of the PUBLIC placeholder arc-agi_test_challenges.json. During "Save &
+# Run All" (commit) Kaggle runs against this placeholder — a full 10 h pass there
+# is pure waste, since only the scoring rerun (real hidden file, different hash)
+# counts. On a hash match we run a small canary instead; any mismatch (the real
+# rerun, or an updated placeholder) falls through to the FULL run — fail-safe.
+PLACEHOLDER_SHA256 = "232264c58f825ee77327dcfc9f4e5cb2f83b8d997eb69032be1bf2205bbe1a83"
+_COMMIT_CANARY_TASKS = 12
 
 
-def _build_solvers(model, use_ttt: bool, llm_kwargs: dict):
-    """Assemble the GPU ensemble: DSL + heuristics + (TTT or plain LLM)."""
-    from arc.solvers.dsl.solver import DSLSolver
-    from arc.solvers.identity import CHEAP_SOLVERS
+def _sha256_file(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    if use_ttt:
-        from arc.solvers.llm import LoraTTTRunner, TTTConfig, TTTSolver
 
-        ttt = TTTSolver(
-            LoraTTTRunner(model, TTTConfig()),
-            llm_kwargs=llm_kwargs,
-            ttt_data_kwargs=DEFAULT_TTT_DATA_KWARGS,
-        )
-        print("ensemble: DSL + heuristics + TTT(LoRA)")
-        return [DSLSolver(), *CHEAP_SOLVERS, ttt]
-
-    from arc.solvers.llm import LLMSolver
-
-    print("ensemble: DSL + heuristics + LLM(HFModel)")
-    return [DSLSolver(), *CHEAP_SOLVERS, LLMSolver(model, **llm_kwargs)]
+# Backward-compat alias: `_build_solvers` moved to `arc.solvers.factory.build_solvers`
+# (Rung 3 — shared by the sequential and parallel-worker entrypoints). Kept here
+# so existing imports/tests (and scripts/kaggle_eval.py) keep working unchanged.
+_build_solvers = build_solvers
 
 
 def main(
@@ -64,39 +118,126 @@ def main(
     per_task_budget_s: float = 150.0,
     llm_kwargs: dict | None = None,
     use_ttt: bool = True,
+    max_tasks: int | None = None,
+    ttt_config: dict | None = None,
+    num_workers: int = 0,
 ) -> dict:
+    """Run the ensemble over the test challenges and write submission.json.
+
+    `max_tasks=N` runs a CANARY: only the first N tasks are solved (validating
+    GPU + model load + TTT end-to-end in minutes instead of hours) while the
+    written submission still covers every task (unsolved ones keep the fallback
+    grid), so the output file is always schema-complete. `ttt_config` overrides
+    TTTConfig fields (e.g. {"max_steps": 16} for a faster canary).
+
+    `num_workers>1` fans out across that many processes, each holding one FULL
+    model replica pinned to its own GPU (see `arc.parallel.run_parallel`) —
+    the Rung 3 multi-GPU path for hardware like Kaggle's L4x4. The default
+    `num_workers=0` (or 1, or no `model_path`) keeps the sequential
+    single-process path — the kill-switch if the parallel path misbehaves.
+    """
     cfg = get_config()
     model_path = model_path or os.environ.get("ARC_MODEL_PATH")
     adapter_path = adapter_path or os.environ.get("ARC_ADAPTER_PATH")
     print(f"mode={cfg.mode}  data_dir={cfg.data_dir}  model_path={model_path}")
     print(f"adapter_path={adapter_path}  use_ttt={use_ttt}")
 
-    tasks = load_challenges(cfg.challenges_path("test"))
-    print(f"loaded {len(tasks)} test tasks")
+    challenges_path = cfg.challenges_path("test")
+    _require_data(challenges_path)  # clear error if the data isn't attached
+    covered = _pre_write_fallback(challenges_path, cfg.submission_path)
+    print(f"pre-wrote fallback submission for {covered} tasks -> {cfg.submission_path}")
 
-    solvers = None
-    if model_path:
-        from arc.solvers.llm import HFModel  # lazy: imports torch
+    # Commit fast path: don't burn ~10 GPU-h solving the public placeholder.
+    file_hash = _sha256_file(challenges_path)
+    print(f"test_challenges sha256={file_hash}")
+    if (
+        max_tasks is None
+        and file_hash == PLACEHOLDER_SHA256
+        and not os.environ.get("ARC_FORCE_FULL")
+    ):
+        max_tasks = _COMMIT_CANARY_TASKS
+        print(
+            f"COMMIT RUN detected (placeholder test file) -> canary of "
+            f"{max_tasks} tasks. The scoring rerun sees a different hash and "
+            f"runs FULL. Set ARC_FORCE_FULL=1 to override."
+        )
 
-        # adapter_path = the base-fine-tuned (synthetic-corpus) adapter; TTT
-        # adapts further on top of it per task.
-        model = HFModel(model_path, adapter_path=adapter_path)
-        solvers = _build_solvers(model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS)
-    else:
-        print("WARNING: no model_path — running DSL/heuristic ensemble only")
+    try:
+        tasks_all = load_challenges(challenges_path)
+    except MalformedTaskError as exc:
+        # The pre-written fallback is already a complete, scoreable submission;
+        # keep it rather than crashing the kernel with an empty output.
+        print(f"ERROR: could not parse challenges ({exc}); keeping fallback submission")
+        return {"problems": [str(exc)], "elapsed_s": 0.0, "num_tasks": 0}
+    print(f"loaded {len(tasks_all)} test tasks")
+
+    tasks = tasks_all
+    if max_tasks is not None and max_tasks < len(tasks_all):
+        tasks = dict(itertools.islice(tasks_all.items(), max_tasks))
+        print(f"CANARY: solving only {len(tasks)}/{len(tasks_all)} tasks "
+              f"(submission stays schema-complete; unsolved keep the fallback)")
 
     t0 = time.monotonic()
-    predictions = run_pipeline(
-        tasks,
-        solvers=solvers,
-        output_path=cfg.submission_path,
-        per_task_budget_s=per_task_budget_s,
-        verbose=True,
-    )
+    if model_path and num_workers > 1:
+        # Rung 3: N worker processes, each a full model replica pinned to one
+        # GPU (arc.parallel), instead of one model sharded across every GPU.
+        print(f"num_workers={num_workers}: routing to the multi-process parallel path")
+        worker_config = {
+            "model_path": model_path,
+            "adapter_path": adapter_path,
+            "use_ttt": use_ttt,
+            "llm_kwargs": llm_kwargs or DEFAULT_LLM_KWARGS,
+            "ttt_config": ttt_config,
+        }
+        predictions = run_parallel(
+            tasks,
+            worker_config,
+            output_path=cfg.submission_path,
+            num_workers=num_workers,
+            per_task_budget_s=per_task_budget_s,
+        )
+    else:
+        solvers = None
+        if model_path:
+            try:
+                from arc.solvers.llm import HFModel  # lazy: imports torch
+
+                # adapter_path = the base-fine-tuned (synthetic-corpus)
+                # adapter; TTT adapts further on top of it per task.
+                model = HFModel(model_path, adapter_path=adapter_path)
+                solvers = _build_solvers(
+                    model, use_ttt, llm_kwargs or DEFAULT_LLM_KWARGS, ttt_config
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A model that can't load (no GPU -> "Torch not compiled with
+                # CUDA enabled", OOM, bad path) must NOT sink the run: fall
+                # back to the CPU-safe DSL/heuristic ensemble instead of
+                # crashing with an all-fallback (1x1-zero) submission that
+                # scores 0.
+                print(f"WARNING: model load failed ({exc}); falling back to DSL ensemble")
+                solvers = None
+        else:
+            print("WARNING: no model_path — running DSL/heuristic ensemble only")
+
+        predictions = run_pipeline(
+            tasks,
+            solvers=solvers,
+            output_path=cfg.submission_path,
+            per_task_budget_s=per_task_budget_s,
+            verbose=True,
+        )
     elapsed = time.monotonic() - t0
 
+    if len(tasks) < len(tasks_all):
+        # Canary run: merge the solved subset over a full fallback set so the
+        # file on disk covers every task_id (schema-complete, scoreable).
+        full = empty_predictions(tasks_all)
+        full.update(predictions)
+        predictions = full
+        write_submission(build_submission(predictions), cfg.submission_path)
+
     submission = build_submission(predictions)
-    problems = validate_submission(submission, tasks)
+    problems = validate_submission(submission, tasks_all)
     print(f"submission: {cfg.submission_path}  schema_problems={len(problems)}")
     for p in problems[:5]:
         print("  -", p)
@@ -114,10 +255,28 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable test-time training (plain LLM transduction).",
     )
+    parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Canary: solve only the first N tasks (submission stays complete).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help=(
+            "Fan out across this many processes, each a full model replica "
+            "pinned to one GPU (e.g. 4 on Kaggle L4x4). 0/1 = sequential "
+            "single-process path (default; kill-switch)."
+        ),
+    )
     args = parser.parse_args()
     main(
         model_path=args.model_path,
         adapter_path=args.adapter_path,
         per_task_budget_s=args.per_task_budget,
         use_ttt=not args.no_ttt,
+        max_tasks=args.max_tasks,
+        num_workers=args.num_workers,
     )

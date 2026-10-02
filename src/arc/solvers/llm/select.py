@@ -1,15 +1,23 @@
 """Candidate selection: aggregate weighted grid votes into a ranked list.
 
-In M1 the weight is a simple count across augmentations (a grid that survives
-many independent augmentations is more trustworthy). M2 will add model
-log-likelihood as an additional weight signal — same aggregation, richer weights.
+Three selectors, in increasing strength:
+  * `rank_by_votes` — augmentation-consensus voting (a grid that survives many
+    independent augmentations is more trustworthy).
+  * `score_candidates` — re-rank by model log-likelihood under the single
+    canonical prompt.
+  * `score_candidates_poe` — product-of-experts: sum log-probs across several
+    augmented prompts. A wrong candidate that happens to look plausible under
+    one framing rarely stays plausible under all of them; this was one of the
+    top selection levers in the 2025 winners' pipelines.
 """
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 
+from ...augment.task_aug import TaskAug
 from ...io.grid import Grid
 from ...io.loader import Pair
 from ...serialize.prompt import build_prompt
@@ -35,6 +43,36 @@ def score_candidates(
         (grid, model.score(prompt, COMPLETION_PREFIX + grid_to_str(grid)))
         for grid in candidates
     ]
+    scored.sort(key=lambda kv: (-kv[1], _size(kv[0]), kv[0]))
+    return scored
+
+
+def score_candidates_poe(
+    model: LanguageModel,
+    train: Sequence[Pair],
+    test_input: Grid,
+    candidates: Sequence[Grid],
+    augs: Sequence[TaskAug],
+    deadline_s: float | None = None,
+) -> list[tuple[Grid, float]]:
+    """Rank candidates by summed log-prob across augmented prompts (PoE).
+
+    For each augmentation the train pairs, test input, AND candidate are mapped
+    into that frame, so the model judges a self-consistent view. Augmentations
+    are processed whole (every candidate scored under an aug before the deadline
+    is checked) so partial-time results stay comparable. Best first.
+    """
+    totals = [0.0] * len(candidates)
+    for k, aug in enumerate(augs):
+        # Always score under the first frame; stop adding frames past deadline.
+        if k > 0 and deadline_s is not None and time.monotonic() >= deadline_s:
+            break
+        atrain = [aug.apply_pair(p) for p in train]
+        prompt = build_prompt(atrain, aug.apply_grid(test_input))
+        for i, grid in enumerate(candidates):
+            completion = COMPLETION_PREFIX + grid_to_str(aug.apply_grid(grid))
+            totals[i] += model.score_sum(prompt, completion)
+    scored = list(zip(candidates, totals, strict=True))
     scored.sort(key=lambda kv: (-kv[1], _size(kv[0]), kv[0]))
     return scored
 

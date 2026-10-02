@@ -70,4 +70,7 @@ comfortably under 12 h for 240 tasks. Only then "Submit to Competition".
 - L4x4 = 4×24 GB. A 3B model in bf16 needs ~6 GB; plenty of headroom for TTT
   (M2) and larger models later.
 - Everything staged must be open-source-compatible (Apache/MIT/CC-BY) for prize
-  eligibility — Qwen2.5 qualifies.
+  eligibility. ⚠️ Most Qwen2.5 sizes are Apache-2.0, but the **3B** variants
+  (general *and* Coder) are under the **Qwen Research License — NOT prize-eligible**.
+  Use an Apache-2.0 size for the final submission: Qwen2.5-Coder-**7B**-Instruct
+  (fits one L4) or **1.5B**. The 3B is fine only for leaderboard/testing.

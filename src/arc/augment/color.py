@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 
-from ..io.grid import Grid, NUM_COLORS
+from ..io.grid import NUM_COLORS, Grid
 
 Perm = tuple[int, ...]
 
@@ -28,7 +28,7 @@ def random_perm(seed: int, keep_zero: bool = False) -> Perm:
         shuffled = movable[:]
         rng.shuffle(shuffled)
         perm = [0] + [0] * (NUM_COLORS - 1)
-        for src, dst in zip(movable, shuffled):
+        for src, dst in zip(movable, shuffled, strict=False):
             perm[src] = dst
         return tuple(perm)
     symbols = list(range(NUM_COLORS))

@@ -13,7 +13,7 @@ completion still yields a usable grid (or None if nothing parses).
 
 from __future__ import annotations
 
-from ..io.grid import Grid, MAX_DIM, is_valid_grid
+from ..io.grid import MAX_DIM, Grid, is_valid_grid
 
 ROW_SEP = "\n"
 

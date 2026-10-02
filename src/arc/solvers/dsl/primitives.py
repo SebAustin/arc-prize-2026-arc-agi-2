@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...augment import symmetry
 from ...io.grid import Grid, background_color, from_numpy, shape, to_numpy
 from ...io.loader import Task
-from ...augment import symmetry
+
+# ARC grids are at most 30x30; a program whose output would exceed this can never
+# be a correct answer, so scale/tile refuse to allocate beyond it (bounds memory
+# on a pathological test input and lets the oversized program fail verification).
+MAX_GRID_DIM = 30
 
 
 # ---- Parameter-free geometric ops -----------------------------------------
@@ -68,6 +73,8 @@ def scale_program(fy: int, fx: int):
 
     def f(g: Grid) -> Grid:
         arr = to_numpy(g)
+        if arr.shape[0] * fy > MAX_GRID_DIM or arr.shape[1] * fx > MAX_GRID_DIM:
+            return g  # oversized -> pass through so the program fails to verify
         return from_numpy(np.repeat(np.repeat(arr, fy, axis=0), fx, axis=1))
 
     return f
@@ -77,7 +84,10 @@ def tile_program(ny: int, nx: int):
     """Repeat the whole grid ny x nx times (np.tile)."""
 
     def f(g: Grid) -> Grid:
-        return from_numpy(np.tile(to_numpy(g), (ny, nx)))
+        arr = to_numpy(g)
+        if arr.shape[0] * ny > MAX_GRID_DIM or arr.shape[1] * nx > MAX_GRID_DIM:
+            return g  # oversized -> pass through so the program fails to verify
+        return from_numpy(np.tile(arr, (ny, nx)))
 
     return f
 
@@ -89,8 +99,8 @@ def learn_colormap(task: Task) -> dict[int, int] | None:
     for pair in task.train:
         if pair.output is None or shape(pair.input) != shape(pair.output):
             return None
-        for in_row, out_row in zip(pair.input, pair.output):
-            for s, d in zip(in_row, out_row):
+        for in_row, out_row in zip(pair.input, pair.output, strict=False):
+            for s, d in zip(in_row, out_row, strict=False):
                 if s in mapping and mapping[s] != d:
                     return None
                 mapping[s] = d
