@@ -28,6 +28,41 @@ from arc.solvers.factory import build_solvers
 from kaggle_submit import DEFAULT_LLM_KWARGS
 
 
+def _gpu_mem_stats() -> dict:
+    """Best-effort peak-VRAM stats (GiB) for this run; {} on CPU / no torch.
+
+    Part of the "no information-free run" instrumentation: pairing peak usage with
+    the card's total tells us the HEADROOM — the difference between "fit with room
+    to grow the recipe" and "OOM'd by 200 MiB" — which is the exact axis the NVARC
+    4B+TTT fit question turns on.
+    """
+    try:
+        import torch  # noqa: PLC0415
+
+        if not torch.cuda.is_available():
+            return {}
+        gib = 1024**3
+        free, total = torch.cuda.mem_get_info()
+        return {
+            "vram_peak_alloc_gib": round(torch.cuda.max_memory_allocated() / gib, 2),
+            "vram_peak_reserved_gib": round(torch.cuda.max_memory_reserved() / gib, 2),
+            "vram_total_gib": round(total / gib, 2),
+        }
+    except Exception:  # pragma: no cover — CPU environments / torch quirks
+        return {}
+
+
+def _reset_gpu_peak_stats() -> None:
+    """Zero CUDA peak counters so `_gpu_mem_stats` measures THIS run, not a prior arm."""
+    try:
+        import torch  # noqa: PLC0415
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # pragma: no cover — CPU environments
+        pass
+
+
 def _task_solved(attempts, expected) -> bool:
     """Competition rule: every test output matched by either of its 2 attempts."""
     if len(attempts) != len(expected):
@@ -92,6 +127,7 @@ def main(
 
     predictions = {}
     solved = 0
+    _reset_gpu_peak_stats()  # measure peak VRAM of THIS eval, not model-load/prior-arm
     t0 = time.monotonic()
     for n, (task_id, task) in enumerate(tasks.items(), 1):
         t_task = time.monotonic()
@@ -103,6 +139,10 @@ def main(
             f"[{n:3d}/{len(tasks)}] {task_id}  {'PASS' if ok else 'fail'}  "
             f"({time.monotonic() - t_task:.1f}s, running {solved}/{n})"
         )
+
+    # Capture peak VRAM BEFORE freeing the model (max_memory_allocated resets with
+    # the cache flush below) — this is the headroom reading the fit question needs.
+    gpu_stats = _gpu_mem_stats()
 
     # Release this run's model before returning: paired A/B evals call main()
     # twice in one kernel, and a resident 15GB model from arm 1 starves arm 2's
@@ -129,6 +169,7 @@ def main(
             "limit": limit,
             "elapsed_s": round(elapsed, 1),
             "s_per_task": round(elapsed / max(len(tasks), 1), 1),
+            **gpu_stats,
         }
     )
     print(f"summary: {summary}")
