@@ -69,6 +69,17 @@ def test_parse_skips_malformed_entries():
     assert set(preds) == {"ok"}
 
 
+def test_missing_file_exits_cleanly(tmp_path):
+    """A nonexistent path (e.g. the runbook's placeholder before any run exists)
+    must give a clear message, not a raw FileNotFoundError traceback."""
+    import pytest
+
+    mod = _load()
+    with pytest.raises(SystemExit) as exc:
+        mod.main(str(tmp_path / "does_not_exist.json"))
+    assert "no submission file" in str(exc.value)
+
+
 def test_id_mismatch_scores_zero_and_warns(tmp_path, monkeypatch, capsys):
     _eval_split(tmp_path, monkeypatch)
     mod = _load()

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from arc.config import get_config
 from arc.eval.harness import load_split
@@ -52,6 +53,13 @@ def parse_submission(raw: dict) -> Predictions:
 
 
 def main(submission_path: str, split: str = "evaluation") -> dict:
+    if not Path(submission_path).is_file():
+        raise SystemExit(
+            f"no submission file at {submission_path!r}.\n"
+            "This scorer runs on a submission.json produced by an actual eval/anchor run "
+            "(see docs/runbooks/nvarc-anchor-l4x4.md) — there isn't one yet until that run "
+            "completes. Point it at a real downloaded submission.json."
+        )
     with open(submission_path, encoding="utf-8") as f:
         raw = json.load(f)
     preds = parse_submission(raw)
