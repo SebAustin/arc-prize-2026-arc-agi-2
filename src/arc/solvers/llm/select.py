@@ -77,6 +77,48 @@ def score_candidates_poe(
     return scored
 
 
+def score_candidates_scoreagg(
+    model: LanguageModel,
+    train: Sequence[Pair],
+    test_input: Grid,
+    ranked: Sequence[tuple[Grid, float]],
+    augs: Sequence[TaskAug],
+    deadline_s: float | None = None,
+) -> list[tuple[Grid, float]]:
+    """NVARC-style 'scoreagg': occurrence COUNT + geometric-mean of per-aug log-probs.
+
+    `ranked` is `[(grid, count)]` (e.g. from `rank_by_votes` — the decode/DFS
+    occurrence weight per distinct grid). Each grid's geomean term is the mean of
+    its length-normalized per-aug log-probs (= log of the geometric mean of the
+    per-aug probabilities), and the final score is `count + geomean`: the count is
+    the primary signal (a grid the search keeps rediscovering is trustworthy) and
+    the geomean breaks ties among equally-frequent candidates. Best first.
+
+    Augmentations are processed whole (every candidate scored under an aug before
+    the deadline is checked) so partial-time results stay comparable, mirroring
+    `score_candidates_poe`. With no augs scored the geomean term is 0 (count-only).
+    """
+    grids = [g for g, _ in ranked]
+    counts = dict(ranked)
+    logprob_sums = dict.fromkeys(grids, 0.0)
+    augs_scored = 0
+    for k, aug in enumerate(augs):
+        if k > 0 and deadline_s is not None and time.monotonic() >= deadline_s:
+            break
+        atrain = [aug.apply_pair(p) for p in train]
+        prompt = build_prompt(atrain, aug.apply_grid(test_input))
+        for grid in grids:
+            completion = COMPLETION_PREFIX + grid_to_str(aug.apply_grid(grid))
+            logprob_sums[grid] += model.score(prompt, completion)
+        augs_scored += 1
+    scored = [
+        (grid, counts[grid] + (logprob_sums[grid] / augs_scored if augs_scored else 0.0))
+        for grid in grids
+    ]
+    scored.sort(key=lambda kv: (-kv[1], _size(kv[0]), kv[0]))
+    return scored
+
+
 def rank_by_votes(weighted: Iterable[tuple[Grid, float]]) -> list[tuple[Grid, float]]:
     """Sum weights per distinct grid and return them best-first.
 

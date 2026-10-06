@@ -59,6 +59,23 @@ def test_build_submission_embeds_submission_entrypoints(tmp_path, monkeypatch):
     assert "scripts/kaggle_train.py" not in files  # training code stays out
 
 
+def test_submission_run_cell_uses_shared_profile_not_a_hardcoded_branch(tmp_path, monkeypatch):
+    """The notebook's T4-safe-vs-L4-full decision must come from arc.profiles
+    (shared with the autopilot), not a hand-coded device_count branch — otherwise
+    the two paths drift. profiles.py must also be embedded so the run cell resolves."""
+    mod = _load_builder()
+    out = tmp_path / "submission.ipynb"
+    monkeypatch.setattr(mod, "SUBMISSION_OUT", out)
+    nb = json.loads(mod.build_submission().read_text())
+    run_src = next(
+        "".join(c["source"]) for c in nb["cells"] if "result = main(" in "".join(c["source"])
+    )
+    assert "runtime_recipe" in run_src and "arc.profiles" in run_src
+    assert "n_gpu >= 4" not in run_src  # the divergent hand-coded branch is gone
+    files = _embedded_files(nb["cells"][2])
+    assert "src/arc/profiles.py" in files  # embedded so the run cell can import it
+
+
 def test_build_train_adapter_has_five_cells(tmp_path, monkeypatch):
     mod = _load_builder()
     out = tmp_path / "train_adapter.ipynb"

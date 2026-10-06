@@ -122,7 +122,11 @@ class TTTSolver(Solver):
 
     def solve(self, task: Task, budget_s: float) -> Candidates:
         t0 = time.monotonic()
-        examples = build_ttt_examples(task, **self.ttt_data_kwargs)
+        # One keep_zero (fix-black) flag governs BOTH inference and TTT-corpus augs:
+        # inherit it from llm_kwargs unless ttt_data_kwargs sets it explicitly.
+        ttt_data_kwargs = dict(self.ttt_data_kwargs)
+        ttt_data_kwargs.setdefault("keep_zero", self.llm_kwargs.get("keep_zero", False))
+        examples = build_ttt_examples(task, **ttt_data_kwargs)
         corpus_s = time.monotonic() - t0
         try:
             adapt_deadline = t0 + self.ttt_fraction * budget_s

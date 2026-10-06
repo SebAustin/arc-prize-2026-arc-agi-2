@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from arc.profiles import select_profile
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATE_PATH = REPO_ROOT / "artifacts" / "autopilot_state.json"
 SUBMISSION_LOG_PATH = REPO_ROOT / "SUBMISSION_LOG.md"
@@ -92,7 +94,9 @@ FULL_EVAL_LIMIT: int | None = None
 # degrades to DSL-only (and can flip the kernel to ERROR). These memory-safe TTT
 # settings (proven on the v7 canary) are merged UNDER any run's own ttt_config so
 # batch/seq stay T4-survivable while callers can still tune max_steps etc.
-T4_SAFE_TTT = {"batch_size": 1, "max_seq_len": 1536}
+# Sourced from the t4_safe profile so "T4-safe vs L4-full" has ONE source of truth
+# (see arc.profiles); the autopilot is API-bound to T4x2 so it always uses t4_safe.
+T4_SAFE_TTT = select_profile(2, "t4_safe").ttt_config
 
 
 # ---- Kaggle mount-path convention guard ------------------------------------

@@ -20,12 +20,17 @@ from ...io.loader import Task
 from ..base import Candidates, Solver
 from .infer import generate_candidates, generate_candidates_batch, generate_candidates_dfs
 from .model import LanguageModel
-from .select import rank_by_votes, score_candidates, score_candidates_poe
+from .select import (
+    rank_by_votes,
+    score_candidates,
+    score_candidates_poe,
+    score_candidates_scoreagg,
+)
 
 _log = logging.getLogger(__name__)
 
 # Candidate selection modes, in increasing strength (see select.py).
-SELECTION_MODES = ("votes", "likelihood", "poe")
+SELECTION_MODES = ("votes", "likelihood", "poe", "scoreagg")
 # Decode modes: one greedy completion per prompt, or a DFS token-tree search
 # returning every completion above a cumulative-probability threshold
 # (see dfs_decode.py). Greedy is the default — DFS is opt-in per config.
@@ -190,6 +195,21 @@ class LLMSolver(Solver):
                     task.train,
                     task.test[i].input,
                     voted,
+                    augs[: self.poe_augs],
+                    deadline_s=deadline,
+                )
+                score_s += time.monotonic() - t_sc
+                voted = [g for g, _ in scored]
+            elif voted and self.selection == "scoreagg":
+                # NVARC 'scoreagg': combine the decode/vote occurrence COUNT with
+                # the geomean of per-aug log-probs over the shared augs — the
+                # count is primary, the geomean breaks ties.
+                t_sc = time.monotonic()
+                scored = score_candidates_scoreagg(
+                    self.model,
+                    task.train,
+                    task.test[i].input,
+                    ranked,
                     augs[: self.poe_augs],
                     deadline_s=deadline,
                 )
