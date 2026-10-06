@@ -53,6 +53,6 @@ def test_unsolvable_task_returns_empty(grid_factory, task_factory):
     # Random unrelated outputs: no simple program should verify.
     inputs = [grid_factory(3, 3, seed=s) for s in range(3)]
     outputs = [grid_factory(3, 3, seed=100 + s) for s in range(3)]
-    task = task_factory(list(zip(inputs, outputs)), [grid_factory(3, 3, seed=200)])
+    task = task_factory(list(zip(inputs, outputs, strict=False)), [grid_factory(3, 3, seed=200)])
     candidates = SOLVER.solve(task, BUDGET)
     assert candidates[0] == []

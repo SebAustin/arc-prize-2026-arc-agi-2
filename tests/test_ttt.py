@@ -5,8 +5,8 @@ from __future__ import annotations
 from arc.augment import symmetry
 from arc.io.submission import build_submission, validate_submission
 from arc.pipeline import run
-from arc.solvers.llm import MockModel, MockTTTRunner, TTTSolver
 from arc.solvers.dsl.solver import DSLSolver
+from arc.solvers.llm import MockModel, MockTTTRunner, TTTSolver
 
 
 def _rot90(g):

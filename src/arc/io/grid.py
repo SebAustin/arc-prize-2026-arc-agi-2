@@ -9,7 +9,7 @@ Solvers may compute in numpy for convenience and convert back with `from_numpy`.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 

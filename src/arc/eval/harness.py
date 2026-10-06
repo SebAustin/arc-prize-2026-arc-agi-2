@@ -8,7 +8,7 @@ works on 'training' and 'evaluation' but not 'test' (solutions hidden).
 from __future__ import annotations
 
 from ..config import Config, get_config
-from ..io.loader import Task, load_challenges, load_solutions
+from ..io.loader import load_challenges, load_solutions
 from ..pipeline import run as run_pipeline
 from ..solvers.base import Solver
 from .metrics import score_predictions

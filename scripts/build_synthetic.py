@@ -15,7 +15,8 @@ import time
 from collections import Counter
 
 from arc.eval.metrics import score_predictions
-from arc.pipeline import default_solvers, run as run_pipeline
+from arc.pipeline import default_solvers
+from arc.pipeline import run as run_pipeline
 from arc.synth.build_dataset import (
     build_synthetic_tasks,
     save_examples_jsonl,
@@ -29,10 +30,15 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default="artifacts/synth.jsonl")
     parser.add_argument("--sanity", type=int, default=200, help="DSL solve-rate sample size")
+    parser.add_argument(
+        "--hard-only",
+        action="store_true",
+        help="restrict to DSL-provably-unsolvable generators and drop any easy re-rolls",
+    )
     args = parser.parse_args()
 
     t0 = time.monotonic()
-    tasks = build_synthetic_tasks(args.n, seed=args.seed)
+    tasks = build_synthetic_tasks(args.n, seed=args.seed, hard_only=args.hard_only)
     examples = tasks_to_examples(tasks)
     path = save_examples_jsonl(examples, args.out)
     gen_s = time.monotonic() - t0
