@@ -21,7 +21,10 @@ Safety invariants (encoded + tested in tests/test_profiles.py):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 # Auto-mode threshold: at least this many GPUs selects the L4-full recipe.
 _L4_MIN_GPUS = 4
@@ -105,8 +108,10 @@ def detect_device_count() -> int:
 
         if torch.cuda.is_available():
             return torch.cuda.device_count()
-    except Exception:  # pragma: no cover — CPU / no-torch environments
-        pass
+    except Exception as exc:  # pragma: no cover — CPU / no-torch environments
+        # The 0 -> t4_safe fallback is intentional and safe, but record WHY we fell
+        # back (no torch vs a CUDA init error) rather than swallowing it silently.
+        logger.debug("detect_device_count: no GPU detected (%s); defaulting to 0", exc)
     return 0
 
 

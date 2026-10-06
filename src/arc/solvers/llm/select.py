@@ -47,6 +47,37 @@ def score_candidates(
     return scored
 
 
+def _accumulate_aug_logprobs(
+    model: LanguageModel,
+    train: Sequence[Pair],
+    test_input: Grid,
+    candidates: Sequence[Grid],
+    augs: Sequence[TaskAug],
+    score_fn,
+    deadline_s: float | None = None,
+) -> tuple[list[float], int]:
+    """Sum `score_fn(prompt, completion)` for each candidate across augmented
+    framings (train pairs, test input, AND candidate mapped into each frame, so
+    the model judges a self-consistent view).
+
+    Augmentations are processed whole (every candidate scored under an aug before
+    the deadline is checked) and the first frame always runs, so partial-time
+    results stay comparable. Returns (sums aligned with `candidates`, augs_scored).
+    """
+    sums = [0.0] * len(candidates)
+    augs_scored = 0
+    for k, aug in enumerate(augs):
+        if k > 0 and deadline_s is not None and time.monotonic() >= deadline_s:
+            break
+        atrain = [aug.apply_pair(p) for p in train]
+        prompt = build_prompt(atrain, aug.apply_grid(test_input))
+        for i, grid in enumerate(candidates):
+            completion = COMPLETION_PREFIX + grid_to_str(aug.apply_grid(grid))
+            sums[i] += score_fn(prompt, completion)
+        augs_scored += 1
+    return sums, augs_scored
+
+
 def score_candidates_poe(
     model: LanguageModel,
     train: Sequence[Pair],
@@ -55,24 +86,11 @@ def score_candidates_poe(
     augs: Sequence[TaskAug],
     deadline_s: float | None = None,
 ) -> list[tuple[Grid, float]]:
-    """Rank candidates by summed log-prob across augmented prompts (PoE).
-
-    For each augmentation the train pairs, test input, AND candidate are mapped
-    into that frame, so the model judges a self-consistent view. Augmentations
-    are processed whole (every candidate scored under an aug before the deadline
-    is checked) so partial-time results stay comparable. Best first.
-    """
-    totals = [0.0] * len(candidates)
-    for k, aug in enumerate(augs):
-        # Always score under the first frame; stop adding frames past deadline.
-        if k > 0 and deadline_s is not None and time.monotonic() >= deadline_s:
-            break
-        atrain = [aug.apply_pair(p) for p in train]
-        prompt = build_prompt(atrain, aug.apply_grid(test_input))
-        for i, grid in enumerate(candidates):
-            completion = COMPLETION_PREFIX + grid_to_str(aug.apply_grid(grid))
-            totals[i] += model.score_sum(prompt, completion)
-    scored = list(zip(candidates, totals, strict=True))
+    """Rank candidates by summed log-prob across augmented prompts (PoE). Best first."""
+    sums, _ = _accumulate_aug_logprobs(
+        model, train, test_input, candidates, augs, model.score_sum, deadline_s
+    )
+    scored = list(zip(candidates, sums, strict=True))
     scored.sort(key=lambda kv: (-kv[1], _size(kv[0]), kv[0]))
     return scored
 
@@ -100,20 +118,14 @@ def score_candidates_scoreagg(
     """
     grids = [g for g, _ in ranked]
     counts = dict(ranked)
-    logprob_sums = dict.fromkeys(grids, 0.0)
-    augs_scored = 0
-    for k, aug in enumerate(augs):
-        if k > 0 and deadline_s is not None and time.monotonic() >= deadline_s:
-            break
-        atrain = [aug.apply_pair(p) for p in train]
-        prompt = build_prompt(atrain, aug.apply_grid(test_input))
-        for grid in grids:
-            completion = COMPLETION_PREFIX + grid_to_str(aug.apply_grid(grid))
-            logprob_sums[grid] += model.score(prompt, completion)
-        augs_scored += 1
+    # Mean per-token logprob (model.score) so the geomean term stays length-
+    # normalized and small, keeping the occurrence count the primary signal.
+    sums, augs_scored = _accumulate_aug_logprobs(
+        model, train, test_input, grids, augs, model.score, deadline_s
+    )
     scored = [
-        (grid, counts[grid] + (logprob_sums[grid] / augs_scored if augs_scored else 0.0))
-        for grid in grids
+        (grid, counts[grid] + (s / augs_scored if augs_scored else 0.0))
+        for grid, s in zip(grids, sums, strict=True)
     ]
     scored.sort(key=lambda kv: (-kv[1], _size(kv[0]), kv[0]))
     return scored
