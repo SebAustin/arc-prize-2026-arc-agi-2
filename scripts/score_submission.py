@@ -75,11 +75,18 @@ def main(submission_path: str, split: str = "evaluation") -> dict:
     summary["split"] = split
     print(f"summary: {summary}")
     if not scored:
-        print(
-            "WARNING: 0 tasks scored — the submission's task_ids don't match the "
-            f"{split!r} split. Did the notebook run on the eval split, not the hidden test?"
+        # Zero coverage is NOT a 0% score — the notebook read the wrong split/keys, so
+        # the run is uninformative. Exit non-zero with a loud banner so a hurried or
+        # scripted read can't mistake it for a real reproduction FAIL and start
+        # debugging the solver instead of the input path. (Measurement-correctness only.)
+        raise SystemExit(
+            "FAIL — wrong split: 0 tasks scored. The submission's task_ids don't match the "
+            f"{split!r} split (did the notebook run on the eval split, not the hidden test?). "
+            "This is NOT a 0% score — the run is uninformative; re-check the input path per "
+            "docs/runbooks/nvarc-anchor-l4x4.md. "
+            f"(scored_tasks=0, missing_from_submission={summary['missing_from_submission']})"
         )
-    elif summary["missing_from_submission"]:
+    if summary["missing_from_submission"]:
         print(
             f"NOTE: {summary['missing_from_submission']} {split} tasks are absent from the "
             "submission and were not scored (expected if the run was limited/sliced)."

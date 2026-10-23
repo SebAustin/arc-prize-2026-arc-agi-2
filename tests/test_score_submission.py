@@ -80,13 +80,20 @@ def test_missing_file_exits_cleanly(tmp_path):
     assert "no submission file" in str(exc.value)
 
 
-def test_id_mismatch_scores_zero_and_warns(tmp_path, monkeypatch, capsys):
+def test_id_mismatch_raises_wrong_split(tmp_path, monkeypatch, capsys):
+    """Zero coverage is NOT a 0% score — the notebook read the wrong split/keys, so
+    the run is uninformative. The scorer must exit non-zero with a loud banner, not
+    quietly return a 0-task summary a hurried read could mistake for a real FAIL."""
+    import pytest
+
     _eval_split(tmp_path, monkeypatch)
     mod = _load()
     path = tmp_path / "submission.json"
     path.write_text(json.dumps({"zzz": [{"attempt_1": [[1]], "attempt_2": [[2]]}]}))
 
-    summary = mod.main(str(path))
-    assert summary["scored_tasks"] == 0
-    assert summary["missing_from_submission"] == 2
-    assert "0 tasks scored" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        mod.main(str(path))
+    msg = str(exc.value)
+    assert "wrong split" in msg and "FAIL" in msg
+    # the summary line is still printed before the raise, so the raw numbers are visible
+    assert "scored_tasks" in capsys.readouterr().out
