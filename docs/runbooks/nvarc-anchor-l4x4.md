@@ -1,8 +1,9 @@
 # Runbook: NVARC reproduction anchor on L4×4
 
 **Goal.** Get the project's first *trustworthy* number: run the ARC Prize 2025
-winner's own notebook, untouched except for its input path, on the hardware it was
-built for (4× L4), and score its output on our 120-task canary with our metrics.
+winner's own notebook, untouched except for removing its 4-task dev filter, on the
+hardware it was built for (4× L4), and score its output on our 120-task canary with
+our metrics.
 
 **Why this run.** In 3+ months our pipeline has never produced a non-zero canary
 signal. This run is the **reproduction gate** (ADR context + the 2026-10-02 research
@@ -28,14 +29,45 @@ API) cannot drive it. It needs GPU quota, so it's a post-reset action.
    panel in any Kaggle notebook editor, or your account usage page.)
 2. This repo checked out locally (for scoring afterward). No GPU needed locally.
 
-## Before the quota window (no compute — read-only recon)
+## Recon (DONE 2026-10-26 — pulled the notebook source; findings below)
 
-Open NVARC's notebook in the browser and find the **single line that reads the
-test-challenges file**. Record its exact **variable name, cell, and current path**
-(it points at the 2025 *hidden* test, e.g. `.../arc-agi_test_challenges.json`). Also
-confirm the notebook builds its submission dict keys from the **challenges it reads**,
-not from a 240-key `sample_submission.json`. The repo holds no copy of this notebook,
-so this recon is the only thing that makes the one input edit (step 5) reliable.
+Recon was run by pulling the source (`kaggle kernels pull sorokin/arc2-qwen3-unsloth-flash-lora-batch4-queue`,
+8 code cells). The notebook selects its input split by an **env var, not a hardcoded path**:
+
+```python
+rerun_mode = os.getenv("KAGGLE_IS_COMPETITION_RERUN")   # cells 4, 5, 7
+if rerun_mode: test_path = ".../arc-agi_test_challenges.json"        # hidden test (private rerun only)
+else:          test_path = ".../arc-agi_evaluation_challenges.json"  # eval split
+```
+
+`KAGGLE_IS_COMPETITION_RERUN` is set **only** during Kaggle's private rerun. A normal
+**Save & Run All (Commit)** is NOT a rerun, so the notebook **auto-selects the eval split**
+and cell 7 self-scores it against `arc-agi_evaluation_solutions.json` (prints
+`*** Reload score: ...`). **No path edit is needed to reach the eval split** — the earlier
+"repoint the path" instruction was wrong and has been removed.
+
+**THE ONE REQUIRED EDIT — delete the 4-task dev filter.** In the `starter.py` cell (the one
+ending `mp.spawn(local_worker, ..., nprocs=4)`), the non-rerun path queues only 4 task ids:
+
+```python
+for key in sorted(data.keys()):
+    if not rerun_mode:                                   # <-- DEV SUBSET: delete this block
+        if key not in ["0934a4d8", "36a08778", "981571dc", "aa4ec2a5"]:
+            continue
+    queue.put(key)
+```
+
+Left in place, a commit infers only **4 of ~120** eval tasks; `get_submission` still emits all
+~120 and defaults the other ~116 to `[[0]]` → a submission that scores ~0 and *looks like a
+failed run* (this is the likely source of the Oct-2 0/0.12/0.25 baseline). Delete the
+`if not rerun_mode: ... continue` block so every eval task is queued. This single edit is the
+difference between a real anchor and a wasted window.
+
+Other facts (no edit needed): model mounts at
+`/kaggle/input/qwen3_4b_grids15_sft139/transformers/bfloat16/1`; input is the **arc-prize-2025**
+competition (its eval ids overlap our 2026 canary — `0934a4d8` etc.); `global_end_time =
+now + 12h − 10min` (fits the commit cap); `nprocs=4` (needs L4×4); `n_guesses=2` (real pass@2,
+so `attempt_1 ≠ attempt_2` on a genuine run).
 
 ## Steps (Kaggle web UI)
 
@@ -50,23 +82,25 @@ so this recon is the only thing that makes the one input edit (step 5) reliable.
 3. Confirm the notebook's shipped inputs are still attached (model
    `sorokin/qwen3_4b_grids15_sft139` + the NVARC code/datasets it imports); re-add any
    that dropped during the fork.
-4. **Add Input → Competitions → ARC Prize 2026** (`arc-prize-2026-arc-agi-2`). Do
-   **not** attach a separate third-party "eval" dataset — only the competition mount
-   guarantees the task-ids **and per-test ordering** match the local solutions the
-   scorer reads (scoring is positional, and 52 of 172 eval outputs sit at a non-zero
-   test index, so order must match).
-5. **Make the one edit from your recon:** repoint that test-challenges variable to
-   `/kaggle/input/arc-prize-2026-arc-agi-2/arc-agi_evaluation_challenges.json`. You are
-   changing **both** the competition slug (2025 → `arc-prize-2026-arc-agi-2`) **and**
-   the filename (`test` → `evaluation`). Copy the folder name from the attached-input
-   sidebar rather than typing it. Change nothing else — recipe, LoRA, decoding,
-   selection stay as released.
+4. **Confirm the `arc-prize-2025` competition input is still attached** (it ships the
+   eval challenges + solutions the notebook reads and self-scores against). Do **not**
+   swap it for 2026 or a third-party "eval" dataset — the notebook is wired to the 2025
+   mount and its eval ids overlap our canary. (Only if the later cross-check with our
+   scorer shows partial coverage do you also need the 2026 mount — see "Score it".)
+5. **Make the one required edit from Recon: delete the 4-task dev filter** in the
+   `starter.py` / `mp.spawn` cell — the `if not rerun_mode: if key not in [...]: continue`
+   block — so all ~120 eval tasks are queued, not 4. Leave everything else exactly as
+   released: recipe, LoRA, decoding, selection, and the `rerun_mode` path logic are all
+   already correct (a Commit auto-takes the eval branch).
 6. **Save Version → Save & Run All (Commit).** Do **not** rely on an interactive "Run
    All" left open: a 6–12 h session drops on an idle timeout or closed browser and
    loses all output — only the committed batch run gets the full 12 h cap and persists
    a downloadable `submission.json`. In the first ~2 min of the committed run's log,
    confirm **4 workers start (ranks 0–3)** with no CUDA/device-count or OOM error; if
-   it is not 4× L4, **stop and fix the accelerator** before the window drains.
+   it is not 4× L4, **stop and fix the accelerator** before the window drains. As it
+   runs, confirm the `[Rank N] finished <key>` lines cover **far more than 4 distinct
+   keys** (proof the dev filter is gone); at the end, cell 7 prints `*** Reload score:`
+   — that printed number is the anchor read, independent of our scorer.
 7. When the committed version finishes, **download `submission.json` from that
    version's output** (not from an interactive session). Note the wall-clock.
 
@@ -85,6 +119,15 @@ This prints our canary numbers on exactly the yardstick we use for our own stack
   *not* a 0% score, it means the notebook ran on the wrong split/keys — re-check steps
   4–5 and do **not** record it as a result.
 
+Two cross-checks against the notebook's own `*** Reload score` (the primary anchor read):
+- **Coverage:** if our scorer reports `scored_tasks` between 1 and 119 (partial, not 0),
+  the 2025 and 2026 eval sets differ on a few ids — trust the notebook's self-score and,
+  if an exactly-comparable canary number is needed, re-run with the 2026 competition mounted
+  and the `else`-branch slug changed to `arc-prize-2026-arc-agi-2`.
+- **Not degenerate:** a genuine pass@2 run has `attempt_1 ≠ attempt_2` on most tasks. If a
+  downloaded `submission.json` has them identical everywhere (as the Oct-2 baseline did),
+  the decode/selection path didn't run — the dev filter is still in, or the run timed out.
+
 ## The gate
 
 - **Anchor PASS:** exact-match ≳ **15–20%**. The method + our harness are sound.
@@ -97,9 +140,10 @@ Record the result (number, wall-clock, date) in `.remember/` and update the plan
 
 ## Notes
 
-- "Untouched except the input path" is deliberate: pointing at the eval split is the
-  minimum change needed to get a *scorable* number; the recipe itself is unmodified,
-  so the result is a faithful reproduction read.
+- "Untouched except the dev filter" is deliberate: removing the 4-task subset is the
+  minimum change needed to get a *full-eval scorable* number (the eval split is already
+  auto-selected on a non-rerun commit); the recipe itself is unmodified, so the result
+  is a faithful reproduction read.
 - Our own-stack reproduction (next step) runs at best-effort fidelity and is **not**
   held to this exact gate — the gate lives on NVARC's untouched notebook. See
   [ADR-0003](../adr/0003-optimize-for-the-private-rerun-not-the-public-leaderboard.md)
